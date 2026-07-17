@@ -10,8 +10,9 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 
 # Microsoft Graph — OneDrive for Business
-GRAPH_TENANT_ID     = os.environ.get("GRAPH_TENANT_ID", "809171af-afc9-4373-a8f4-c15de135d53a")
-GRAPH_CLIENT_ID     = os.environ.get("GRAPH_CLIENT_ID", "61b9b990-2785-4c25-9540-f7ff7a5d1ce4")
+# All credentials must be loaded from environment variables
+GRAPH_TENANT_ID     = os.environ.get("GRAPH_TENANT_ID", "")
+GRAPH_CLIENT_ID     = os.environ.get("GRAPH_CLIENT_ID", "")
 GRAPH_CLIENT_SECRET = os.environ.get("GRAPH_CLIENT_SECRET", "")  # Must be set in environment
 GRAPH_WEBHOOK_NOTIFICATION_URL = os.environ.get(
     "GRAPH_WEBHOOK_NOTIFICATION_URL", "https://buildtronix.ai/api/precon/graph-webhook"
