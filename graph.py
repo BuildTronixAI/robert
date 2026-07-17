@@ -6,6 +6,7 @@ Graph flow:
   Operational tasks: planner → executor → reviewer
 """
 
+import os
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.checkpoint.memory import MemorySaver
@@ -13,8 +14,14 @@ from state import RobertState
 from nodes import planner, executor, reviewer, bill
 from nodes.coder import coder
 from nodes.architect import architect_node
+from config import MAX_ITERATIONS, WORKSPACE_PATH
 
-CHECKPOINT_DB = "/var/lib/robert/workspace/robert_checkpoints.db"
+CHECKPOINT_DB = os.environ.get(
+    "ROBERT_CHECKPOINT_DB",
+    os.path.join(WORKSPACE_PATH, "robert_checkpoints.db"),
+)
+# Loud degraded mode when durable checkpoints are unavailable
+ALLOW_MEMORY_CHECKPOINTER = os.environ.get("ROBERT_ALLOW_MEMORY_CHECKPOINTER", "false").lower() == "true"
 
 
 def route_after_planner(state: RobertState) -> str:
@@ -46,10 +53,10 @@ def route_after_review(state: RobertState) -> str:
     needs_redesign = state.get("needs_redesign", False)
     print(f"[GRAPH route_after_review] iter={iteration} needs_revision={needs_revision} requires_escalation={requires_escalation} origin={origin} needs_redesign={needs_redesign}")
 
-    if iteration >= 3:
-        print(f"[GRAPH route_after_review] -> END (max iterations)")
+    if iteration >= MAX_ITERATIONS:
+        print(f"[GRAPH route_after_review] -> END (max iterations={MAX_ITERATIONS})")
         return END
-    if requires_escalation:
+    if requires_escalation and not needs_revision:
         print(f"[GRAPH route_after_review] -> END (requires_escalation)")
         return END
     if needs_revision:
@@ -117,7 +124,10 @@ def build_graph():
                 pass
             raise
     except sqlite3.Error as e:
-        print(f"[Robert] Sqlite checkpointer failed ({e}), falling back to MemorySaver")
+        if not ALLOW_MEMORY_CHECKPOINTER:
+            print(f"[Robert] CRITICAL: Sqlite checkpointer failed ({e}) — refusing MemorySaver fallback")
+            raise
+        print(f"[Robert] WARNING: Sqlite checkpointer failed ({e}), falling back to MemorySaver (degraded)")
         checkpointer = MemorySaver()
     return graph.compile(checkpointer=checkpointer)
 

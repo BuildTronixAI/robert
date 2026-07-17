@@ -19,7 +19,6 @@ import os
 import sys
 import time
 from typing import List, Dict, Any
-import anthropic
 
 
 # ── Setup Logging ──────────────────────────────────────────────────
@@ -106,7 +105,12 @@ class Witness:
     
     def _check_via_haiku(self, reasoning: str, context: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Call Anthropic Haiku 4.5 to evaluate the reasoning with v1.1 schema."""
-        
+        try:
+            import anthropic
+        except ImportError:
+            _log("anthropic not installed — skipping Haiku check (fail-open)")
+            return []
+
         client = anthropic.Anthropic(api_key=self.api_key)
         
         # Prepare context for Haiku
@@ -233,7 +237,7 @@ Check the reasoning against all 7 items above and return the JSON list with sour
         except json.JSONDecodeError as e:
             _log(f"JSON parse error from Haiku: {e}")
             return []
-        except anthropic.APIError as e:
+        except Exception as e:
             _log(f"Anthropic API error: {e}")
             return []
 

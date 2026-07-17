@@ -142,6 +142,21 @@ Validates results and determines if escalation is needed.
 - Supabase as database backend
 - Telegram for notifications
 
+## Hardening (TronixMesh / Robert COO)
+
+Robert is the Buildtronix COO engine inside TronixMesh. Stability-first rules:
+
+- **Startup preconditions** run before the Telegram listener accepts tasks (dirty git / audit RPC).
+- **Orchestrator** (Witness + Little Voice) is wired; Little Voice has a `run_little_voice` entrypoint; timeouts cancel futures.
+- **Mesh signing v2** covers `task_type` + `ttl_seconds`; Ed25519 verification is fail-closed; nonces claimed only after authenticity.
+- **Telegram offsets** persist after successful handling (crash mid-task can redeliver); callback queries dispatch to BOB approve/reject.
+- **RBAC** (`check_permission`) runs after identity mint; rate limits apply to Telegram work.
+- **Exec / memory** use argv execution, workspace cwd, path confinement, credential scrubbing.
+- **Policy tokens** refuse empty/`dev-secret` signing keys.
+- **Graph retries**: reviewer owns `iteration_count`; deterministic pre-check failures retry instead of dead-ending.
+
+Precon (GC estimating product) lives in this repo but is **not** part of the Robert LangGraph COO loop — harden separately.
+
 ## License
 
 Internal tool for Buildtronix.

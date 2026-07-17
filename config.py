@@ -68,11 +68,14 @@ def validate_config():
 
     required = [
         "OPENROUTER_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_KEY",
-        "SENDGRID_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"
+        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"
     ]
     missing = [k for k in required if not os.environ.get(k, "").strip()]
     if missing:
         raise RuntimeError(f"[Robert] Missing required env vars: {', '.join(missing)}")
+    if not os.environ.get("SENDGRID_API_KEY", "").strip() and not os.environ.get("RESEND_API_KEY", "").strip():
+        # Soft warning — email is optional for core COO loop
+        print("[Robert] WARNING: neither SENDGRID_API_KEY nor RESEND_API_KEY set — email tools disabled")
 
     errors = []
 

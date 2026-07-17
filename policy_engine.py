@@ -101,7 +101,9 @@ class PolicyDecision:
         payload = asdict(self)
         payload.pop("signature", None)
         canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-        secret = os.environ.get("BOB_SHARED_SECRET", "dev-secret")
+        secret = os.environ.get("BOB_SHARED_SECRET", "").strip()
+        if not secret:
+            raise RuntimeError("BOB_SHARED_SECRET required for policy token signing — refuse empty/dev fallback")
         sig = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
         payload["signature"] = sig
         return json.dumps(payload)
@@ -114,7 +116,9 @@ class PolicyDecision:
         if not sig:
             raise ValueError("Token missing signature")
         canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-        secret = os.environ.get("BOB_SHARED_SECRET", "dev-secret")
+        secret = os.environ.get("BOB_SHARED_SECRET", "").strip()
+        if not secret:
+            raise RuntimeError("BOB_SHARED_SECRET required for policy token verification — refuse empty/dev fallback")
         expected = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig, expected):
             raise ValueError("Token signature invalid")

@@ -397,13 +397,23 @@ def reviewer(state: RobertState) -> RobertState:
     pre = deterministic_checks(task_type, result)
     if not pre["passed"]:
         print(f"[REVIEWER] Deterministic failures: {pre['failures']}")
-        state["requires_escalation"] = True
-        state["needs_revision"] = True
-        state["revision_notes"] = "Pre-check failures: " + "; ".join(pre["failures"])
-        state["messages"].append({
-            "role": "reviewer",
-            "content": f"RETRY (deterministic): {state['revision_notes']}"
-        })
+        # Retry until max iterations; escalate only when retries are exhausted.
+        if iteration >= MAX_ITERATIONS:
+            state["requires_escalation"] = True
+            state["needs_revision"] = False
+            state["escalate_reason"] = "Pre-check failures after max iterations: " + "; ".join(pre["failures"])
+            state["messages"].append({
+                "role": "reviewer",
+                "content": f"ESCALATE (deterministic): {state['escalate_reason']}"
+            })
+        else:
+            state["requires_escalation"] = False
+            state["needs_revision"] = True
+            state["revision_notes"] = "Pre-check failures: " + "; ".join(pre["failures"])
+            state["messages"].append({
+                "role": "reviewer",
+                "content": f"RETRY (deterministic): {state['revision_notes']}"
+            })
         return state
 
     # --- Step 2: LLM review (Haiku, not Sonnet) ---
@@ -449,13 +459,22 @@ def reviewer(state: RobertState) -> RobertState:
             )
         })
     else:
-        # Empty/too-short output — auto-retry
-        state["requires_escalation"] = True
-        state["needs_revision"] = True
-        state["revision_notes"] = "Output was empty or too short. Regenerate with more detail."
-        state["messages"].append({
-            "role": "reviewer",
-            "content": "RETRY: Output empty or insufficient."
-        })
+        # Empty/too-short output — retry, escalate only at max iterations
+        if iteration >= MAX_ITERATIONS:
+            state["requires_escalation"] = True
+            state["needs_revision"] = False
+            state["escalate_reason"] = "Output was empty or too short after max iterations."
+            state["messages"].append({
+                "role": "reviewer",
+                "content": "ESCALATE: Output empty or insufficient after max iterations."
+            })
+        else:
+            state["requires_escalation"] = False
+            state["needs_revision"] = True
+            state["revision_notes"] = "Output was empty or too short. Regenerate with more detail."
+            state["messages"].append({
+                "role": "reviewer",
+                "content": "RETRY: Output empty or insufficient."
+            })
 
     return state

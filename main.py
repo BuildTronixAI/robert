@@ -1,21 +1,48 @@
 """Main entry point for Robert COO Agent."""
 
+import os
 import sys
 
 from graph import graph
 from state import RobertState
-from tools.memory import read_memory
+from config import MAX_ITERATIONS, WORKSPACE_PATH
 from tools.telegram import send_telegram
+
+
+def _load_default_context() -> str:
+    """Load engineering KB from workspace; never use absolute escape paths via memory tool."""
+    kb_path = os.path.join(WORKSPACE_PATH, "knowledge", "engineering_kb.md")
+    try:
+        with open(kb_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        # Fallback relative to this package (repo checkout)
+        local_kb = os.path.join(os.path.dirname(__file__), "knowledge", "engineering_kb.md")
+        try:
+            with open(local_kb, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            return (
+                "Buildtronix AI platform — construction project management SaaS. "
+                "Modules: Pre-Con, PM, Finance, Field Ops, Service Ops. "
+                "Stack: Next.js, Supabase, Vercel, Python agents. Protocol: TronixMesh."
+            )
 
 
 def run_task(task: str, context: str = "", notify: bool = True, chat_id: str = "default") -> dict:
     """Run a task through Robert's graph."""
+    if not task or not str(task).strip():
+        return {
+            "result": "",
+            "error": "Empty task",
+            "requires_escalation": True,
+            "needs_revision": False,
+            "iteration_count": 0,
+            "reply_status": "FAILURE",
+        }
+
     if not context:
-        try:
-            # Load only the engineering KB — not the full MEMORY.md (too large)
-            context = read_memory("/var/lib/robert/workspace/knowledge/engineering_kb.md")
-        except:
-            context = "Buildtronix AI platform — construction project management SaaS. Modules: Pre-Con, PM, Finance, Field Ops, Service Ops. Stack: Next.js, Supabase, Vercel, Python agents."
+        context = _load_default_context()
 
     initial_state = RobertState(
         # Core task
@@ -66,13 +93,12 @@ def run_task(task: str, context: str = "", notify: bool = True, chat_id: str = "
     # RR-0032 Option A: if graph exits with needs_revision=True and under max iterations,
     # re-invoke on the same thread to continue the RETRY loop internally.
     # This compensates for SqliteSaver treating reviewer output as terminal state.
-    # Observable risk: if re-invoke re-runs planner, iteration_count will jump unexpectedly.
     _retry_count = 0
     while (
         result.get("needs_revision", False)
         and not result.get("requires_escalation", False)
-        and result.get("iteration_count", 0) < 3
-        and _retry_count < 3  # hard safety cap
+        and result.get("iteration_count", 0) < MAX_ITERATIONS
+        and _retry_count < MAX_ITERATIONS  # hard safety cap
     ):
         _retry_count += 1
         print(f"[GRAPH Option-A retry] re-invoking graph, retry={_retry_count}, iter={result.get('iteration_count')}")
