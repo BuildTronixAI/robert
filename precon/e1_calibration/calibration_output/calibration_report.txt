@@ -1,0 +1,34 @@
+======================================================================
+E1 CALIBRATION HARNESS REPORT
+Generated: 2026-06-18 21:00 UTC
+Documents: 1
+======================================================================
+
+ACCURACY: 0.0% (0/1 labeled documents routed correctly)
+
+--- PER-DOCUMENT SCORES ---
+
+FILE:     clearwater-airport-mep.pdf
+  Pages:  14
+  Routed: HUMAN_REVIEW_REQUIRED
+  Truth:  SPEC [Mechanical]  ✗
+  SCORES:
+    spec_title     =  20.0
+    csi_section    =  15.0
+    spec_verbs     =  20.0
+    trade_terms    =  15.0
+    [SPEC TOTAL]   =  70.0  ← routing score
+    schedule_density =   5.0  (diagnostic only)
+    drawing_list     =   3.0  (diagnostic only)
+    addendum_signals =   8.0  (diagnostic only)
+  Detected trade: mechanical
+
+--- RECOMMENDED THRESHOLDS (calibrated to this document set) ---
+
+  spec_floor: 55.0
+  spec_ceiling: 75.0
+
+NOTE: Do not ship until EXTRACTION_FAILED count = 0 on confirmed trade-spec
+      documents that returned zero scope items. Zero scope ≠ success.
+
+======================================================================

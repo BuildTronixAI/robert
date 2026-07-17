@@ -1,0 +1,25 @@
+# Databases
+*.db
+*.db-shm
+*.db-wal
+
+# Runtime state (explicit only — do NOT blanket-ignore *.jsonl)
+robert_memory.json
+quality_log.jsonl
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Backups
+*.bak*
+
+# Secrets
+.env
+.env.*
+
+# Misc
+*.pdf

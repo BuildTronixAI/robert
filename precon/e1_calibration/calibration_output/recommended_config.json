@@ -1,0 +1,11 @@
+{
+  "generated": "2026-06-18 21:00 UTC",
+  "document_count": 1,
+  "thresholds": {
+    "spec_floor": 55.0,
+    "spec_ceiling": 75.0
+  },
+  "separation_quality": "unknown",
+  "signal_analysis": {},
+  "note": "Calibrate these against 5-10+ real documents. Do not treat as gospel from 1 document."
+}

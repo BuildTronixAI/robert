@@ -1,0 +1,1 @@
+/var/lib/openclaw/.openclaw/workspace/precon/a0/config.py

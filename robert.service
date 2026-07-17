@@ -1,0 +1,16 @@
+[Unit]
+Description=Robert COO Agent — Phase 3 Listener
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/.openclaw/workspace/robert
+ExecStart=/usr/bin/python3 /root/.openclaw/workspace/robert/listener.py
+Restart=always
+RestartSec=15
+StandardOutput=append:/root/.openclaw/workspace/robert/robert.log
+StandardError=append:/root/.openclaw/workspace/robert/robert.log
+
+[Install]
+WantedBy=default.target

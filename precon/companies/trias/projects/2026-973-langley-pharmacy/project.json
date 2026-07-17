@@ -1,0 +1,12 @@
+{
+  "project_id": "trias-2026-973",
+  "company_id": "trias-construction",
+  "project_number": "2026-973",
+  "project_name": "Langley Pharmacy Ocala",
+  "location": "Ocala, FL",
+  "building_type": "retail",
+  "project_mode": "gc",
+  "status": "reference",
+  "notes": "Trias vendor list source project. Imported June 17 2026. Plumbing and HVAC subs not awarded — open NewCo opportunity.",
+  "vendor_list_source": "TRIAS-BID-DATA-2026-973-Langley-Pharmacy-Ocala.xlsx"
+}

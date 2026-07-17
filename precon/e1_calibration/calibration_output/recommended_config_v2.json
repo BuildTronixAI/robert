@@ -1,0 +1,44 @@
+{
+  "generated": "2026-06-18 21:06 UTC",
+  "harness_version": "2.0",
+  "extractor_version": "pdfplumber",
+  "document_count": 1,
+  "labeled_count": 1,
+  "accuracy_pct": 0.0,
+  "catastrophic_misroutes": 0,
+  "dataset_adequacy": {
+    "SPEC": {
+      "have": 1,
+      "need": 3,
+      "ok": false
+    },
+    "DRAWING": {
+      "have": 0,
+      "need": 2,
+      "ok": false
+    },
+    "SCHEDULE": {
+      "have": 0,
+      "need": 2,
+      "ok": false
+    },
+    "ADDENDUM": {
+      "have": 0,
+      "need": 2,
+      "ok": false
+    },
+    "UNKNOWN": {
+      "have": 0,
+      "need": 2,
+      "ok": false
+    }
+  },
+  "thresholds": {
+    "auto_route_floor": 0.45,
+    "auto_route_margin": 0.12,
+    "SPEC": 0.35,
+    "ADDENDUM": 0.3,
+    "SCHEDULE": 0.25,
+    "DRAWING": 0.25
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "company_id": "trias-construction",
+  "company_name": "Trias Construction",
+  "company_type": "gc",
+  "address": "2537 Henley Road, Lutz, FL 33558",
+  "status": "customer",
+  "customer_since": "2026-06-16",
+  "billing_entity": "L2R Holdings LLC",
+
+  "precon_mode": "gc",
+
+  "file_root_config": {
+    "type": "local",
+    "path": "/precon/companies/trias/projects"
+  },
+
+  "scoring_weights": {
+    "wheelhouse": 0.25,
+    "location": 0.20,
+    "size": 0.20,
+    "timing": 0.15,
+    "customer_relationship": 0.10,
+    "competition": 0.10
+  },
+
+  "vendor_quality_thresholds": {
+    "recent_quote_days": 90,
+    "local_radius_miles": 150,
+    "award_history_months": 24
+  },
+
+  "output_format": "trias_template",
+  "template_file": "precon/gc-reference/trias/TRIAS-ESTIMATE-TEMPLATE-2026.xlsx",
+
+  "csi_divisions_active": [
+    "024116", "081000", "083300", "084000",
+    "092000", "095100", "096000", "099000",
+    "123000", "220000", "230000", "260000"
+  ],
+
+  "notes": "Buildtronix customer. Invoices L2R-2026-0141 ($35K) and L2R-2026-0142 ($20K) sent June 16 2026. Vendor list seeded from Langley Pharmacy Ocala project (2026-973)."
+}

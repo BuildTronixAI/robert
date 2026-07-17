@@ -1,0 +1,58 @@
+========================================================================
+E1 CALIBRATION HARNESS v2.0 REPORT
+Generated : 2026-06-18 21:06 UTC
+Harness   : v2.0  |  Extractor: pdfplumber
+Documents : 1  (labeled: 1)
+========================================================================
+
+ACCURACY  : 0.0%  (0/1)
+
+--- DATASET ADEQUACY ---
+
+  SPEC         have=1  need=3  ✗ need 3
+  DRAWING      have=0  need=2  ✗ need 2
+  SCHEDULE     have=0  need=2  ✗ need 2
+  ADDENDUM     have=0  need=2  ✗ need 2
+  UNKNOWN      have=0  need=2  ✗ need 2
+
+  ⚠️  Calibration thresholds are NOT reliable until all types meet minimums.
+
+--- PER-DOCUMENT SCORES ---
+
+FILE     : clearwater-airport-mep.pdf
+  SHA256 : dd83236dd4d87756...
+  Pages  : 14
+  Routed : SCHEDULE  ✗
+  Truth  : SPEC
+  SCORES : spec=0.4332  addendum=0.0833  schedule=0.5714  drawing=0.0000
+  Winner : SCHEDULE (0.5714)  margin=0.1382
+  Reason : spec_title_match, csi_section_detected, high_spec_verb_density, trade_terms_present, addendum_language_detected, equipment_schedule_density_high, clean_win:SCHEDULE:0.571(margin:0.138)
+
+--- CONFUSION MATRIX ---
+
+  TRUE \ ROUTED     SCHEDULE                  
+  --------------------------------------------
+  SPEC              1                         
+
+--- RECOMMENDED THRESHOLDS (calibrated to this set) ---
+
+  SPEC: insufficient data, keeping default floor
+  ADDENDUM: insufficient data, keeping default floor
+  SCHEDULE: insufficient data, keeping default floor
+  DRAWING: insufficient data, keeping default floor
+
+  Copy to engine1 config when dataset adequacy is met:
+    auto_route_floor: 0.45
+    auto_route_margin: 0.12
+    SPEC: 0.35
+    ADDENDUM: 0.3
+    SCHEDULE: 0.25
+    DRAWING: 0.25
+
+TRUST MODEL INVARIANTS:
+  HUMAN_REVIEW_REQUIRED → no authoritative extraction runs
+  UNKNOWN               → no extraction runs
+  EXTRACTION_FAILED     → confirmed trade-spec returned 0 scope items
+  Zero scope items ≠ success. Never.
+
+========================================================================
