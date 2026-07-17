@@ -6,23 +6,9 @@ Step 0 Contracts v1.3 §7 compliance:
 - Robert holds BOB's public key only (never BOB's private key)
 - Robert compromise cannot produce forged BOB signatures
 
-Scope (narrow spike — Phase B only):
-- Receive Ed25519-signed mesh task from BOB
-- Validate signature, nonce, TTL
-- Execute task
-- Return STAGED result (never EXTERNALLY_COMMITTED in Phase B)
-- Full Witness audit trail
-
-What D11 does NOT do (Phase B):
-- No EXTERNALLY_COMMITTED state (Phase C+)
-- No governance mutation
-- No Tier 4 approval flows
-- No outbound delegation back to BOB
-
-Step 0 §Implementation Order:
-  Phase B gate: No D11 code until Phase A tests pass (they do — 24/24).
-  D11 executes AGAINST the Thinking Architecture (Witness + Little Voice) 
-  that Phase A hardened.
+Phase B (default): STAGED terminal state — no external delivery
+Phase C (ROBERT_MESH_PHASE=C): may EXTERNALLY_COMMIT by delivering HMAC
+result envelope to BOB_INBOX_URL after staging
 """
 
 from __future__ import annotations
@@ -32,7 +18,6 @@ import hashlib
 import json
 import logging
 import time
-import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -41,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 # Task TTL: reject tasks older than this (seconds)
 TASK_TTL_SECONDS = 300  # 5 minutes
-# Absolute ceiling — never trust a larger per-message ttl_seconds
 MAX_TTL_SECONDS = TASK_TTL_SECONDS
 
 # Mesh signing contract version — fields covered by Ed25519 signature
@@ -56,7 +40,8 @@ class MeshTaskState(str, Enum):
     VERIFIED = "verified"
     QUEUED = "queued"
     RUNNING = "running"
-    STAGED = "staged"       # Phase B terminal state
+    STAGED = "staged"                         # Phase B terminal / Phase C intermediate
+    EXTERNALLY_COMMITTED = "externally_committed"  # Phase C terminal
     FAILED = "failed"
 
 
@@ -80,20 +65,7 @@ class MeshSchemaError(Exception):
 class MeshTask:
     """
     A signed task received from BOB via the inbound mesh receiver.
-    
-    Wire format (JSON):
-    {
-        "task_id": "<uuid>",
-        "sender_id": "<BOB agent ID>",
-        "task_type": "<string>",
-        "payload": {<task-specific content>},
-        "payload_hash": "<SHA-256 of RFC8785(payload)>",
-        "nonce": "<uuid — single use>",
-        "issued_at": <unix timestamp>,
-        "ttl_seconds": <int>,
-        "signature": "<base64-encoded Ed25519 signature>"
-    }
-    
+
     Signature v2 covers:
       v ‖ task_id ‖ sender_id ‖ task_type ‖ payload_hash ‖ nonce ‖ issued_at ‖ ttl_seconds
     """
@@ -106,7 +78,7 @@ class MeshTask:
     issued_at: float
     ttl_seconds: int
     signature: str  # base64-encoded
-    
+
     # Set after validation
     state: MeshTaskState = MeshTaskState.RECEIVED
     received_at: float = 0.0
@@ -131,7 +103,7 @@ class MeshTask:
             raise MeshSchemaError(
                 f"ttl_seconds {ttl} exceeds MAX_TTL_SECONDS={MAX_TTL_SECONDS}"
             )
-        
+
         return cls(
             task_id=data["task_id"],
             sender_id=data["sender_id"],
@@ -146,10 +118,7 @@ class MeshTask:
         )
 
     def signing_message(self) -> bytes:
-        """
-        Reconstruct the message that was signed (MESH_SIGNING_VERSION=2).
-        Covers task_type and ttl_seconds so neither can be mutated in transit.
-        """
+        """Reconstruct the message that was signed (MESH_SIGNING_VERSION=2)."""
         msg = json.dumps({
             "v": MESH_SIGNING_VERSION,
             "task_id": self.task_id,
@@ -166,7 +135,7 @@ class MeshTask:
         """Check if task TTL has elapsed (also reject far-future issued_at)."""
         now = time.time()
         if self.issued_at > now + 60:
-            return True  # clock skew / forged future timestamp
+            return True
         return (now - self.issued_at) > self.ttl_seconds
 
     def verify_payload_hash(self) -> bool:
@@ -177,27 +146,16 @@ class MeshTask:
 
 
 class NonceStore:
-    """
-    In-memory nonce store for replay prevention.
-    Production: backed by Supabase append-only table.
-    """
-    
+    """In-memory nonce store for replay prevention (last-resort fallback)."""
+
     def __init__(self):
-        self._seen: dict[str, float] = {}  # {nonce: timestamp}
-    
+        self._seen: dict[str, float] = {}
+
     def check_and_record(self, nonce: str) -> bool:
-        """
-        Returns True if nonce is fresh (not seen before).
-        Records nonce on first use.
-        Raises MeshReplayError if already seen.
-        """
-        # Purge expired nonces
         cutoff = time.time() - NONCE_WINDOW_SECONDS
         self._seen = {n: t for n, t in self._seen.items() if t > cutoff}
-        
         if nonce in self._seen:
             raise MeshReplayError(f"Nonce already seen: {nonce[:16]}...")
-        
         self._seen[nonce] = time.time()
         return True
 
@@ -205,32 +163,38 @@ class NonceStore:
 class MeshReceiver:
     """
     Robert's inbound mesh receiver.
-    
-    Receives Ed25519-signed tasks from BOB.
-    Validates signature, nonce, TTL, payload hash.
-    Executes task.
-    Returns STAGED result.
-    
-    Step 0 §7 enforcement:
-    - Holds BOB's PUBLIC key only (never private key)
-    - Robert compromise cannot forge BOB signatures
-    - All validation events logged to Witness
+
+    Phase B: validate → execute → STAGED
+    Phase C: validate → execute → STAGED → deliver to BOB → EXTERNALLY_COMMITTED
     """
-    
+
     def __init__(
         self,
         robert_agent_id: str,
-        bob_public_key_hex: str,       # BOB's Ed25519 public key (hex)
-        witness_log=None,               # async fn(event_type, content)
-        nonce_store: Optional[NonceStore] = None,
+        bob_public_key_hex: str,
+        witness_log=None,
+        nonce_store=None,
     ):
         self.robert_agent_id = robert_agent_id
         self._bob_public_key_hex = bob_public_key_hex
         self.witness_log = witness_log
-        self._nonce_store = nonce_store or NonceStore()
+        if nonce_store is not None:
+            self._nonce_store = nonce_store
+        else:
+            try:
+                from mesh_nonce_store import SharedNonceStore
+                self._nonce_store = SharedNonceStore(window_seconds=NONCE_WINDOW_SECONDS)
+                logger.info("D11 using SharedNonceStore (supabase→sqlite→memory)")
+            except Exception as e:
+                logger.warning("D11 SharedNonceStore unavailable (%s) — trying local durable", e)
+                try:
+                    from robert_store import DurableNonceStore
+                    self._nonce_store = DurableNonceStore(window_seconds=NONCE_WINDOW_SECONDS)
+                except Exception as e2:
+                    logger.warning("D11 durable nonce store unavailable (%s) — in-memory", e2)
+                    self._nonce_store = NonceStore()
         self._task_handlers: dict[str, callable] = {}
-        
-        # Parse public key
+
         try:
             self._bob_public_key = bytes.fromhex(bob_public_key_hex)
         except ValueError as e:
@@ -241,57 +205,93 @@ class MeshReceiver:
         self._task_handlers[task_type] = handler
 
     async def receive(self, raw_payload: bytes) -> dict:
-        """
-        Main entry point. Process a raw inbound mesh message.
-        
-        Returns outcome dict with state (STAGED or FAILED).
-        """
+        """Process a raw inbound mesh message. Returns outcome dict."""
         task = None
         try:
-            # Parse
             data = json.loads(raw_payload)
             task = MeshTask.from_dict(data)
-            
+
             await self._witness("MESH_TASK_RECEIVED", {
                 "task_id": task.task_id,
                 "sender_id": task.sender_id,
                 "task_type": task.task_type,
             })
-            
-            # Validate
+
             await self._validate(task)
             task.state = MeshTaskState.VERIFIED
             task.validated_at = time.time()
-            
+
             await self._witness("MESH_TASK_VERIFIED", {
                 "task_id": task.task_id,
                 "task_type": task.task_type,
             })
-            
-            # Queue and run
+
             task.state = MeshTaskState.QUEUED
             task.state = MeshTaskState.RUNNING
-            
+
             result = await self._execute(task)
-            
-            # Stage result — Phase B terminal state
+
+            # Always stage first (integrity hash bound before any external side effect)
             task.staged_payload = result
             task.staged_hash = self._compute_staged_hash(result)
             task.state = MeshTaskState.STAGED
-            
+
             await self._witness("MESH_TASK_STAGED", {
                 "task_id": task.task_id,
                 "task_type": task.task_type,
                 "staged_hash": task.staged_hash,
             })
-            
-            return {
+
+            outcome = {
                 "state": MeshTaskState.STAGED.value,
                 "task_id": task.task_id,
                 "staged_hash": task.staged_hash,
                 "result": result,
             }
-            
+
+            # Phase C: optional external commit to BOB
+            from mesh_outbound import external_commit_enabled, deliver_result_to_bob
+            wants_commit = bool(
+                (isinstance(task.payload, dict) and task.payload.get("commit_external"))
+                or (isinstance(result, dict) and result.get("commit_external"))
+                or external_commit_enabled()
+            )
+            if wants_commit and external_commit_enabled():
+                delivery = deliver_result_to_bob(
+                    task_id=task.task_id,
+                    task_type=task.task_type,
+                    staged_hash=task.staged_hash,
+                    result=result,
+                    sender_id=self.robert_agent_id,
+                )
+                if delivery.get("ok"):
+                    task.state = MeshTaskState.EXTERNALLY_COMMITTED
+                    await self._witness("MESH_TASK_EXTERNALLY_COMMITTED", {
+                        "task_id": task.task_id,
+                        "task_type": task.task_type,
+                        "staged_hash": task.staged_hash,
+                    })
+                    outcome["state"] = MeshTaskState.EXTERNALLY_COMMITTED.value
+                    outcome["delivery"] = delivery.get("delivery")
+                else:
+                    # Fail-closed for commit claim — remain STAGED with error
+                    await self._witness("MESH_TASK_COMMIT_FAILED", {
+                        "task_id": task.task_id,
+                        "error": delivery.get("error", "unknown"),
+                    })
+                    outcome["commit_error"] = delivery.get("error", "unknown")
+                    logger.error(
+                        "D11 Phase C commit failed — remaining STAGED: %s",
+                        delivery.get("error"),
+                    )
+            elif wants_commit and not external_commit_enabled():
+                outcome["commit_error"] = "phase_b_external_commit_disabled"
+                logger.warning(
+                    "D11 commit_external requested but ROBERT_MESH_PHASE!=C — remaining STAGED"
+                )
+
+            return outcome
+
         except MeshAuthError as e:
             logger.error("D11 auth failure: %s", e)
             await self._witness("MESH_TASK_AUTH_FAILED", {
@@ -299,7 +299,7 @@ class MeshReceiver:
                 "error": str(e),
             })
             return {"state": MeshTaskState.FAILED.value, "error": "auth_failed"}
-            
+
         except MeshReplayError as e:
             logger.error("D11 replay attempt: %s", e)
             await self._witness("MESH_TASK_REPLAY_REJECTED", {
@@ -307,14 +307,14 @@ class MeshReceiver:
                 "error": str(e),
             })
             return {"state": MeshTaskState.FAILED.value, "error": "replay_rejected"}
-            
+
         except MeshTTLError as e:
             logger.warning("D11 TTL expired: %s", e)
             await self._witness("MESH_TASK_TTL_EXPIRED", {
                 "task_id": task.task_id if task else "unknown",
             })
             return {"state": MeshTaskState.FAILED.value, "error": "ttl_expired"}
-            
+
         except Exception as e:
             logger.error("D11 unexpected error: %s", e)
             await self._witness("MESH_TASK_FAILED", {
@@ -325,13 +325,9 @@ class MeshReceiver:
 
     async def _validate(self, task: MeshTask) -> None:
         """
-        Full validation sequence (order is load-bearing):
-        1. TTL check
-        2. Payload hash check
-        3. Ed25519 signature verification
-        4. Nonce claim (only after authenticity proven — invalid msgs must not burn nonces)
+        Validation order is load-bearing:
+        1. TTL  2. payload hash  3. Ed25519  4. nonce claim
         """
-        # 1. TTL
         if task.is_expired():
             raise MeshTTLError(
                 f"Task {task.task_id} TTL expired "
@@ -339,25 +335,33 @@ class MeshReceiver:
                 f"age={(time.time()-task.issued_at):.0f}s)"
             )
 
-        # 2. Payload hash
         if not task.verify_payload_hash():
             raise MeshAuthError(
                 f"Payload hash mismatch for task {task.task_id} — "
                 "payload may have been tampered in transit"
             )
 
-        # 3. Ed25519 signature (fail-closed if cryptography unavailable)
         self._verify_signature(task)
 
-        # 4. Nonce (replay prevention) — claim only after authenticity proven
-        self._nonce_store.check_and_record(task.nonce)
+        # Nonce claim after authenticity
+        try:
+            self._nonce_store.check_and_record(
+                task.nonce, task.task_id, getattr(task, "sender_id", "")
+            )  # type: ignore[call-arg]
+        except TypeError:
+            try:
+                self._nonce_store.check_and_record(task.nonce, task.task_id)  # type: ignore[call-arg]
+            except TypeError:
+                self._nonce_store.check_and_record(task.nonce)
+        except MeshReplayError:
+            raise
+        except Exception as e:
+            if e.__class__.__name__ in ("DurableReplayError", "MeshReplayError"):
+                raise MeshReplayError(str(e)) from e
+            raise
 
     def _verify_signature(self, task: MeshTask) -> None:
-        """
-        Verify Ed25519 signature using BOB's PUBLIC key.
-        Robert never holds BOB's private key.
-        Fail-closed if cryptography is not installed.
-        """
+        """Verify Ed25519 signature using BOB's PUBLIC key. Fail-closed."""
         try:
             from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
             from cryptography.exceptions import InvalidSignature
@@ -387,12 +391,11 @@ class MeshReceiver:
         handler = self._task_handlers.get(task.task_type)
         if handler is None:
             raise ValueError(f"No handler registered for task type: {task.task_type}")
-        
         result = await handler(task.task_id, task.payload)
         return result
 
     def _compute_staged_hash(self, result: dict) -> str:
-        """Compute SHA-256 hash of staged result (Step 0 §2.2)."""
+        """Compute SHA-256 hash of staged result."""
         canonical = json.dumps(result, sort_keys=True, separators=(',', ':')).encode()
         return hashlib.sha256(canonical).hexdigest()
 

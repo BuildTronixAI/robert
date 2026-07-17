@@ -15,9 +15,9 @@ import logging.handlers
 import urllib.request
 import urllib.error
 
-# ── D11 Inbound Mesh Receiver (Phase B) ─────────────────────────────────────
+# ── D11 Inbound Mesh Receiver ────────────────────────────────────────────────
 # Receives Ed25519-signed tasks from BOB only.
-# Terminal success state: STAGED. No external execution in Phase B.
+# Phase B terminal: STAGED. Phase C may EXTERNALLY_COMMIT via BOB inbox.
 # Idempotency sentinel: _is_mesh_task
 import os as _d11_os, sys as _d11_sys
 _d11_sys.path.insert(0, _d11_os.path.dirname(__file__))
@@ -25,13 +25,14 @@ try:
     from mesh_receiver import MeshReceiver
     from mesh_receiver_config import BOB_PUBLIC_KEY_HEX, _mesh_witness_log
     from mesh_task_handlers import register_handlers
+    from mesh_outbound import mesh_phase as _mesh_phase
     _mesh_receiver = MeshReceiver(
         robert_agent_id="robert",
         bob_public_key_hex=BOB_PUBLIC_KEY_HEX,
         witness_log=_mesh_witness_log,
     )
     register_handlers(_mesh_receiver)
-    print("[D11] Mesh receiver initialized — STAGED-only mode (Phase B)")
+    print(f"[D11] Mesh receiver initialized — phase={_mesh_phase()}")
 except Exception as _d11_e:
     print(f"[D11] Mesh receiver init failed: {_d11_e} — mesh tasks will be dropped")
     _mesh_receiver = None
@@ -50,22 +51,29 @@ def _is_mesh_task(text: str) -> bool:
 def _handle_mesh_task_sync(text: str, chat_id: str) -> None:
     """
     Route a mesh task to the receiver.
-    Phase B contract: result state must be STAGED, never EXTERNALLY_COMMITTED.
+    Phase B: STAGED only.
+    Phase C: STAGED or EXTERNALLY_COMMITTED (after BOB inbox delivery).
     """
     if _mesh_receiver is None:
         log("[D11] Mesh receiver not initialized — dropping task")
         return
     import asyncio as _a
+    from mesh_outbound import mesh_phase
     loop = _a.new_event_loop()
     try:
         result = loop.run_until_complete(_mesh_receiver.receive(text.encode()))
         state = result.get("state", "unknown")
         task_id = result.get("task_id", "?")[:8]
-        # Phase B enforcement: abort if anything claims EXTERNALLY_COMMITTED
-        if state == "externally_committed":
-            log(f"[D11] HALT — Phase B violation: EXTERNALLY_COMMITTED received (task={task_id})")
+        phase = mesh_phase()
+        if state == "externally_committed" and phase != "C":
+            log(f"[D11] HALT — EXTERNALLY_COMMITTED without Phase C (task={task_id})")
             return
-        log(f"[D11] Mesh task complete: state={state} task_id={task_id}...")
+        if state == "externally_committed":
+            log(f"[D11] Mesh task EXTERNALLY_COMMITTED task_id={task_id}...")
+        else:
+            log(f"[D11] Mesh task complete: state={state} task_id={task_id}...")
+        if result.get("commit_error"):
+            log(f"[D11] commit_error: {result.get('commit_error')}")
     except Exception as e:
         log(f"[D11] Mesh task error: {e}")
     finally:
@@ -356,7 +364,7 @@ def _handle_callback_query(callback: dict) -> None:
         log(f"[callback] handle_callback failed: {e}")
         alert_chris(f"Approval callback failed: {str(e)[:200]}")
 
-def process(text, from_name, chat_id="default"):
+def process(text, from_name, chat_id="default", actor=None):
     """Run task through Robert's graph."""
     # Kill switch — block all processing if BOB_DISABLED=true
     try:
@@ -371,8 +379,17 @@ def process(text, from_name, chat_id="default"):
         log(f"[process] Import error loading run_task: {import_err}")
         raise RuntimeError(f"run_task import failed: {import_err}")
 
+    actor = actor or {}
     context = memory_store.get_context_summary()
-    result = run_task(task=text, context=context, notify=False, chat_id=str(chat_id))
+    result = run_task(
+        task=text,
+        context=context,
+        notify=False,
+        chat_id=str(chat_id),
+        actor_user_id=str(actor.get("user_id", "")),
+        actor_role=str(actor.get("role", "")),
+        actor_jwt=str(actor.get("jwt", "")),
+    )
     
     output = result.get("result", "No output.")
     task_entry = {"task": text, "source": "telegram", "from": from_name}
@@ -612,7 +629,16 @@ def run():
 
                 log(f"Processing: {text[:60]}")
                 try:
-                    result = process(text, from_name, chat_id=chat_id)
+                    result = process(
+                        text,
+                        from_name,
+                        chat_id=chat_id,
+                        actor={
+                            "user_id": identity_profile.get("user_id", ""),
+                            "role": identity_profile.get("role", ""),
+                            "jwt": jwt_token or "",
+                        },
+                    )
                     # result may be a dict or string
                     # RR-0028: extract reviewer verdict flags BEFORE meaningful-output check
                     if isinstance(result, dict):

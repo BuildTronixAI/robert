@@ -365,10 +365,12 @@ def get_telegram_file_url(file_id: str, bot_token: str) -> Tuple[Optional[str], 
 
 def download_telegram_file(url: str, timeout_sec: int = 30) -> Tuple[Optional[bytes], Optional[str]]:
     """Download file bytes from Telegram CDN. Returns (bytes, error)."""
-    import urllib.request
     try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-            return resp.read(), None
+        from tools.safe_fetch import safe_fetch
+        # Telegram file URLs are on api.telegram.org (allowlisted).
+        status, body, _ = safe_fetch(url, timeout=timeout_sec, max_bytes=20_000_000)
+        if status != 200:
+            return None, f"download failed: HTTP {status}"
+        return body, None
     except Exception as e:
         return None, sanitize_error(str(e))

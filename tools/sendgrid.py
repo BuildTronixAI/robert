@@ -1,82 +1,85 @@
-"""Resend email tool for Robert - urllib-based, no SDK dependency."""
+"""Resend email tool for Robert — gated + safe_fetch."""
 
 import os
 import json
-import urllib.request
-import urllib.error
 from typing import Optional
 
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")  # Must be set in environment
+from tools.base import sanitize_error
+from tools.actor_context import require_gate
+from tools.safe_fetch import safe_fetch
+
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_BASE_URL = "https://api.resend.com/emails"
+INTERNAL_DOMAINS = ("buildtronix.ai", "l2rholdings.com")
+
+
+def _is_internal_recipient(to: str) -> bool:
+    addr = (to or "").lower().strip()
+    if "@" not in addr:
+        return False
+    domain = addr.rsplit("@", 1)[-1]
+    return any(domain == d or domain.endswith("." + d) for d in INTERNAL_DOMAINS)
 
 
 def send_email(
-    to: str, 
-    subject: str, 
-    body: str, 
+    to: str,
+    subject: str,
+    body: str,
     html: Optional[str] = None,
-    from_email: str = "robert@buildtronix.ai"
+    from_email: str = "robert@buildtronix.ai",
+    *,
+    skip_gate: bool = False,
 ) -> bool:
     """
-    Send an email via Resend API using urllib (no SDK dependency).
-    
-    Args:
-        to: Recipient email address
-        subject: Email subject
-        body: Email body (plain text, used as fallback if html not provided)
-        html: HTML email body (optional, preferred over plain text)
-        from_email: Sender email address
-    
-    Returns:
-        True if successful, False otherwise
+    Send an email via Resend API.
+    External recipients are RED-tier (approval required at Gate 2).
     """
     try:
         if not RESEND_API_KEY:
             raise ValueError("RESEND_API_KEY not configured")
-        
-        # Prepare email payload
+
+        internal = _is_internal_recipient(to)
+        action = "send_internal_message" if internal else "send_email_external"
+        if not skip_gate:
+            require_gate(
+                action,
+                target=to,
+                reversible=False,
+                data_sensitivity="confidential" if not internal else "internal",
+                execution_payload={
+                    "to": to,
+                    "subject": subject[:200],
+                    "from_email": from_email,
+                    "internal": internal,
+                },
+            )
+
         payload = {
             "from": from_email,
             "to": to,
             "subject": subject,
         }
-        
-        # Use HTML if provided, otherwise plain text
         if html:
             payload["html"] = html
         else:
             payload["text"] = body
-        
-        # Convert to JSON
-        payload_json = json.dumps(payload).encode('utf-8')
-        
-        # Create HTTP request
-        req = urllib.request.Request(
+
+        status, body_bytes, _ = safe_fetch(
             RESEND_BASE_URL,
-            data=payload_json,
+            method="POST",
+            data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {RESEND_API_KEY}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             },
-            method="POST"
+            timeout=10,
         )
-        
-        # Send request
-        with urllib.request.urlopen(req, timeout=10) as response:
-            response_data = json.loads(response.read().decode('utf-8'))
-            status_code = response.status
-            
-            if status_code in [200, 201]:
-                print(f"[Resend] Email sent to {to}. ID: {response_data.get('id', 'unknown')}")
-                return True
-            else:
-                print(f"[Resend] Unexpected status {status_code}: {response_data}")
-                return False
-                
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode('utf-8')
-        print(f"[Resend] HTTP Error {e.code}: {error_body}")
+        if status in (200, 201):
+            response_data = json.loads(body_bytes.decode("utf-8"))
+            print(f"[Resend] Email sent to {to}. ID: {response_data.get('id', 'unknown')}")
+            return True
+        print(f"[Resend] Unexpected status {status}")
         return False
     except Exception as e:
-        print(f"[Resend] Failed to send email to {to}: {str(e)}")
+        print(f"[Resend] Failed to send email to {to}: {sanitize_error(str(e))}")
         return False

@@ -120,35 +120,43 @@ def resolve_identity_and_mint(telegram_user_id: int) -> tuple[str, dict]:
 
     # Call the resolve_identity RPC (service_role — approved carveout)
     rpc_url = f"{SUPABASE_URL}/rest/v1/rpc/resolve_identity"
-    payload  = json.dumps({"p_telegram_user_id": telegram_user_id}).encode()
-
-    req = urllib.request.Request(
-        rpc_url,
-        data=payload,
-        headers={
-            "apikey":       SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json",
-            "Accept":       "application/json",
-        },
-        method="POST",
-    )
+    payload = json.dumps({"p_telegram_user_id": telegram_user_id}).encode()
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
+        from tools.safe_fetch import safe_fetch
+        from tools.base import sanitize_error
+        status, body_bytes, _ = safe_fetch(
+            rpc_url,
+            method="POST",
+            data=payload,
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            timeout=10,
+        )
+        data = json.loads(body_bytes.decode())
     except urllib.error.HTTPError as e:
-        body = e.read().decode()
+        body = ""
+        try:
+            body = e.read().decode() if hasattr(e, "read") else ""
+        except Exception:
+            body = str(e)
+        from tools.base import sanitize_error
+        safe_body = sanitize_error(body)
         if e.code == 404 or "P0002" in body or "not found" in body.lower():
             raise IdentityNotFoundError(
                 f"Telegram user {telegram_user_id} not found in profiles. "
                 f"Add them to the profiles table first."
             ) from e
         raise RuntimeError(
-            f"resolve_identity RPC failed: HTTP {e.code} — {body}"
+            f"resolve_identity RPC failed: HTTP {e.code} — {safe_body}"
         ) from e
     except Exception as e:
-        raise RuntimeError(f"resolve_identity RPC call error: {e}") from e
+        from tools.base import sanitize_error
+        raise RuntimeError(f"resolve_identity RPC call error: {sanitize_error(str(e))}") from e
 
     # RPC returns a list (RETURNS TABLE) — take first row
     if not data or not isinstance(data, list) or len(data) == 0:

@@ -116,3 +116,17 @@ class RobertState(TypedDict):
     'clarification' = ambiguity rule fired, asking a question.
     'engineering'   = normal task execution output.
     Reviewer uses this to skip structural pre-checks on clarification responses."""
+
+    # ── Actor / auth context (set by listener → main) ─────────────────────────
+
+    actor_user_id: str
+    """Buildtronix user id from identity resolution. Empty when CLI/local."""
+
+    actor_role: str
+    """Role from profiles (OWNER/ADMIN/...). Empty when CLI/local."""
+
+    actor_jwt: str
+    """Short-lived user JWT for RLS-scoped tool calls. Never log this field."""
+
+    telegram_chat_id: str
+    """Origin Telegram chat id for this run."""

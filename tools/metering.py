@@ -25,19 +25,25 @@ def _fetch_pricing():
     if not SUPABASE_URL or not SUPABASE_KEY:
         return
     try:
-        req = urllib.request.Request(
+        from tools.safe_fetch import safe_fetch
+        from tools.base import sanitize_error
+        status, body, _ = safe_fetch(
             f"{SUPABASE_URL}/rest/v1/model_pricing?select=*",
             headers={
                 "apikey": SUPABASE_KEY,
                 "Authorization": f"Bearer {SUPABASE_KEY}",
-            }
+            },
+            timeout=5,
         )
-        with urllib.request.urlopen(req, timeout=5) as r:
-            rows = json.loads(r.read())
-            _pricing_cache = {row["model"]: row for row in rows}
-            _pricing_cache_fetched_at = time.time()
+        rows = json.loads(body.decode())
+        _pricing_cache = {row["model"]: row for row in rows}
+        _pricing_cache_fetched_at = time.time()
     except Exception as e:
-        print(f"[meter] pricing fetch failed: {e}")
+        try:
+            from tools.base import sanitize_error
+            print(f"[meter] pricing fetch failed: {sanitize_error(str(e))}")
+        except Exception:
+            print(f"[meter] pricing fetch failed: {e}")
 
 
 def _get_pricing(model: str) -> dict:
@@ -98,9 +104,12 @@ def log_llm_usage(
     }
 
     try:
+        from tools.safe_fetch import safe_fetch
+        from tools.base import sanitize_error
         data = json.dumps(row).encode()
-        req = urllib.request.Request(
+        safe_fetch(
             f"{SUPABASE_URL}/rest/v1/llm_usage",
+            method="POST",
             data=data,
             headers={
                 "apikey": SUPABASE_KEY,
@@ -108,11 +117,14 @@ def log_llm_usage(
                 "Content-Type": "application/json",
                 "Prefer": "return=minimal",
             },
-            method="POST",
+            timeout=5,
         )
-        urllib.request.urlopen(req, timeout=5)
     except Exception as e:
-        print(f"[meter] log failed: {e}")
+        try:
+            from tools.base import sanitize_error
+            print(f"[meter] log failed: {sanitize_error(str(e))}")
+        except Exception:
+            print(f"[meter] log failed: {e}")
 
 
 class _Recorder:

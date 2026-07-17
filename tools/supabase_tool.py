@@ -5,7 +5,6 @@ v1.3: write_with_audit RPC for all writes, sanitize_error on all exceptions,
 Phase 1: No deletes. Duplicates/cancellations flagged for human review.
 """
 from typing import Dict, List, Optional
-from supabase import create_client
 from config import SUPABASE_URL, SUPABASE_KEY, ROBERT_AUDITED_WRITES_ENABLED
 from tools.base import sanitize_error
 
@@ -49,22 +48,31 @@ def get_supabase_client():
     if _client is None:
         if not SUPABASE_URL or not SUPABASE_KEY:
             raise ValueError("Supabase credentials not configured")
+        from supabase import create_client
         _client = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _client
 
 
-def query_table(table: str, filters: Optional[Dict] = None) -> List[Dict]:
+def query_table(
+    table: str,
+    filters: Optional[Dict] = None,
+    *,
+    use_actor_jwt: bool = True,
+) -> List[Dict]:
     """
     Query a Supabase table.
 
-    Args:
-        table: Table name
-        filters: Optional filter dictionary (e.g., {"column": "value"})
-
-    Returns:
-        List of rows matching the query
+    Prefer actor JWT (RLS) when available; fall back to service client for
+    system/CLI paths without an actor.
     """
     try:
+        if use_actor_jwt:
+            from tools.actor_context import get_actor_jwt
+            jwt = get_actor_jwt()
+            if jwt:
+                from auth.user_client import get_user_client
+                return get_user_client(jwt).select(table, filters=filters)
+
         client = get_supabase_client()
         query = client.table(table).select("*")
 
@@ -78,22 +86,36 @@ def query_table(table: str, filters: Optional[Dict] = None) -> List[Dict]:
         raise RuntimeError(sanitize_error(f"Failed to query table {table}: {str(e)}"))
 
 
-def insert_row(table: str, data: Dict, actor_id: str = None, project_id: str = None) -> Dict:
+def insert_row(
+    table: str,
+    data: Dict,
+    actor_id: str = None,
+    project_id: str = None,
+    *,
+    skip_gate: bool = False,
+) -> Dict:
     """
     Insert a row into a Supabase table.
     For audited tables (AUDITED_TABLES), routes through write_with_audit RPC.
     For non-audited tables, inserts directly.
-
-    Args:
-        table: Table name
-        data: Row data dictionary
-        actor_id: UUID of the actor performing the insert (required for audited tables)
-        project_id: UUID of the project (optional)
-
-    Returns:
-        Inserted row data
     """
     try:
+        from tools.actor_context import get_actor_user_id, require_gate
+        if not actor_id:
+            actor_id = get_actor_user_id() or None
+        if not skip_gate:
+            require_gate(
+                "create_record" if table not in AUDITED_TABLES else "write_database",
+                target=table,
+                reversible=True,
+                execution_payload={
+                    "table": table,
+                    "keys": sorted(list(data.keys()))[:40],
+                    "actor_id": actor_id or "",
+                    "project_id": project_id or "",
+                },
+            )
+
         client = get_supabase_client()
 
         if table in AUDITED_TABLES:
@@ -122,22 +144,37 @@ def insert_row(table: str, data: Dict, actor_id: str = None, project_id: str = N
         raise RuntimeError(sanitize_error(f"Failed to insert into table {table}: {str(e)}"))
 
 
-def update_row(table: str, row_id: str, data: Dict, actor_id: str = None, project_id: str = None) -> Dict:
+def update_row(
+    table: str,
+    row_id: str,
+    data: Dict,
+    actor_id: str = None,
+    project_id: str = None,
+    *,
+    skip_gate: bool = False,
+) -> Dict:
     """
     Update a row in a Supabase table.
     For audited tables, routes through write_with_audit RPC (old_value captured server-side).
-
-    Args:
-        table: Table name
-        row_id: UUID of the row to update
-        data: Updated fields
-        actor_id: UUID of the actor performing the update (required for audited tables)
-        project_id: UUID of the project (optional)
-
-    Returns:
-        Updated row data
     """
     try:
+        from tools.actor_context import get_actor_user_id, require_gate
+        if not actor_id:
+            actor_id = get_actor_user_id() or None
+        if not skip_gate:
+            require_gate(
+                "update_record",
+                target=f"{table}:{row_id}",
+                reversible=True,
+                execution_payload={
+                    "table": table,
+                    "row_id": row_id,
+                    "keys": sorted(list(data.keys()))[:40],
+                    "actor_id": actor_id or "",
+                    "project_id": project_id or "",
+                },
+            )
+
         client = get_supabase_client()
 
         if table in AUDITED_TABLES:

@@ -29,7 +29,16 @@ def _load_default_context() -> str:
             )
 
 
-def run_task(task: str, context: str = "", notify: bool = True, chat_id: str = "default") -> dict:
+def run_task(
+    task: str,
+    context: str = "",
+    notify: bool = True,
+    chat_id: str = "default",
+    *,
+    actor_user_id: str = "",
+    actor_role: str = "",
+    actor_jwt: str = "",
+) -> dict:
     """Run a task through Robert's graph."""
     if not task or not str(task).strip():
         return {
@@ -43,6 +52,15 @@ def run_task(task: str, context: str = "", notify: bool = True, chat_id: str = "
 
     if not context:
         context = _load_default_context()
+
+    # Bind actor JWT/role for RLS-scoped tools for the duration of this invoke.
+    from tools.actor_context import set_actor, reset_actor
+    _actor_token = set_actor(
+        user_id=actor_user_id or "",
+        role=actor_role or "",
+        jwt=actor_jwt or "",
+        chat_id=str(chat_id),
+    )
 
     initial_state = RobertState(
         # Core task
@@ -80,52 +98,60 @@ def run_task(task: str, context: str = "", notify: bool = True, chat_id: str = "
         test_results={},
         # Response mode (set by executor — clarification vs engineering)
         response_mode="engineering",
+        # Actor context from listener identity mint
+        actor_user_id=actor_user_id or "",
+        actor_role=actor_role or "",
+        actor_jwt=actor_jwt or "",
+        telegram_chat_id=str(chat_id),
     )
 
     # Persistent thread per Telegram chat — enables multi-turn memory
     # chat_id comes from the Telegram update; group chats share one thread
     thread_id = f"tg_{chat_id}"
     config = {"configurable": {"thread_id": thread_id}}
-    result = graph.invoke(initial_state, config=config)
-    # RR-0032 diagnostic: observe what state graph.invoke() returns
-    print(f"[GRAPH invoke_return] needs_revision={result.get('needs_revision')} requires_escalation={result.get('requires_escalation')} iteration_count={result.get('iteration_count')} result_len={len(result.get('result','') or '')}")
+    try:
+        result = graph.invoke(initial_state, config=config)
+        # RR-0032 diagnostic: observe what state graph.invoke() returns
+        print(f"[GRAPH invoke_return] needs_revision={result.get('needs_revision')} requires_escalation={result.get('requires_escalation')} iteration_count={result.get('iteration_count')} result_len={len(result.get('result','') or '')}")
 
-    # RR-0032 Option A: if graph exits with needs_revision=True and under max iterations,
-    # re-invoke on the same thread to continue the RETRY loop internally.
-    # This compensates for SqliteSaver treating reviewer output as terminal state.
-    _retry_count = 0
-    while (
-        result.get("needs_revision", False)
-        and not result.get("requires_escalation", False)
-        and result.get("iteration_count", 0) < MAX_ITERATIONS
-        and _retry_count < MAX_ITERATIONS  # hard safety cap
-    ):
-        _retry_count += 1
-        print(f"[GRAPH Option-A retry] re-invoking graph, retry={_retry_count}, iter={result.get('iteration_count')}")
-        result = graph.invoke(result, config=config)
-        print(f"[GRAPH Option-A result] needs_revision={result.get('needs_revision')} iteration_count={result.get('iteration_count')} result_len={len(result.get('result','') or '')}")
+        # RR-0032 Option A: if graph exits with needs_revision=True and under max iterations,
+        # re-invoke on the same thread to continue the RETRY loop internally.
+        # This compensates for SqliteSaver treating reviewer output as terminal state.
+        _retry_count = 0
+        while (
+            result.get("needs_revision", False)
+            and not result.get("requires_escalation", False)
+            and result.get("iteration_count", 0) < MAX_ITERATIONS
+            and _retry_count < MAX_ITERATIONS  # hard safety cap
+        ):
+            _retry_count += 1
+            print(f"[GRAPH Option-A retry] re-invoking graph, retry={_retry_count}, iter={result.get('iteration_count')}")
+            result = graph.invoke(result, config=config)
+            print(f"[GRAPH Option-A result] needs_revision={result.get('needs_revision')} iteration_count={result.get('iteration_count')} result_len={len(result.get('result','') or '')}")
 
-    # Send result to Chris via Telegram
-    if notify and result.get("result"):
-        import re
-        task_short = task[:80] + "..." if len(task) > 80 else task
-        # Strip markdown that breaks Telegram parse
-        result_clean = re.sub(r'[*_`#\[\]\(\)]', '', result['result'][:3000])
-        task_clean = re.sub(r'[*_`#\[\]\(\)]', '', task_short)
-        msg = f"Robert - Task Complete\n\nTask: {task_clean}\n\n{result_clean}"
-        if result.get("requires_escalation"):
-            msg += "\n\nNeeds your attention."
-        send_telegram(msg)
+        # Send result to Chris via Telegram
+        if notify and result.get("result"):
+            import re
+            task_short = task[:80] + "..." if len(task) > 80 else task
+            # Strip markdown that breaks Telegram parse
+            result_clean = re.sub(r'[*_`#\[\]\(\)]', '', result['result'][:3000])
+            task_clean = re.sub(r'[*_`#\[\]\(\)]', '', task_short)
+            msg = f"Robert - Task Complete\n\nTask: {task_clean}\n\n{result_clean}"
+            if result.get("requires_escalation"):
+                msg += "\n\nNeeds your attention."
+            send_telegram(msg, skip_gate=True)  # listener/notify path — already authorized
 
-    # RR-0059-rev7 compat: inject reply_status for listener protocol gate
-    if isinstance(result, dict) and 'reply_status' not in result:
-        if result.get('requires_escalation'):
-            result['reply_status'] = 'FAILURE'
-        elif result.get('result'):
-            result['reply_status'] = 'SUCCESS_REPLY'
-        else:
-            result['reply_status'] = 'SUCCESS_NO_REPLY'
-    return result
+        # RR-0059-rev7 compat: inject reply_status for listener protocol gate
+        if isinstance(result, dict) and 'reply_status' not in result:
+            if result.get('requires_escalation'):
+                result['reply_status'] = 'FAILURE'
+            elif result.get('result'):
+                result['reply_status'] = 'SUCCESS_REPLY'
+            else:
+                result['reply_status'] = 'SUCCESS_NO_REPLY'
+        return result
+    finally:
+        reset_actor(_actor_token)
 
 
 def main():

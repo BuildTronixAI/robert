@@ -55,59 +55,56 @@ def _check_and_claim_idempotency(idempotency_key: str, action_type: str, target:
                                   payload_hash: str, originating_task_id: str,
                                   decision_id: str) -> None:
     """
-    TTL-aware idempotency check via claim_idempotency_key() Postgres function.
+    TTL-aware idempotency claim.
 
-    Behavior:
-    - Key absent: INSERT and proceed (allowed)
-    - Key present, NOT expired: duplicate — BLOCKED
-    - Key present, EXPIRED: delete old row, INSERT new, proceed (TTL re-execution allowed)
-    - Supabase unavailable: FAIL-CLOSED — execution blocked
-
-    No soft fallback. No silent continue.
+    Prefer Supabase RPC when SUPABASE_DB_URL is set; otherwise use durable local
+    SQLite store (robert_store). Local mode is logged loudly so operators know
+    audit/idempotency is not multi-host shared.
     """
     db_url = os.environ.get("SUPABASE_DB_URL", "")
-    if not db_url:
-        print(f"[GATE] MISSING_SUPABASE_CONFIG: cannot check idempotency — BLOCKED")
-        raise PermissionError(
-            f"[GATE] IDEMPOTENCY_CHECK_FAILED: No SUPABASE_DB_URL. "
-            f"Cannot verify '{action_type}' is not a duplicate. Execution blocked."
-        )
-    try:
-        import psycopg2
-        conn = psycopg2.connect(db_url)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT claim_idempotency_key(%s, %s, %s, %s, %s, %s)",
-            (idempotency_key, action_type, target, payload_hash,
-             originating_task_id, decision_id)
-        )
-        result = cur.fetchone()[0]
-        conn.commit()
-        cur.close()
-        conn.close()
+    result = None
 
-        if result == "duplicate":
-            print(f"[GATE] DUPLICATE_EXECUTION_BLOCKED: key {idempotency_key[:16]}... within TTL window")
-            raise PermissionError(
-                f"[GATE] DUPLICATE_EXECUTION_BLOCKED: '{action_type}' on '{target}' "
-                f"with key {idempotency_key[:16]}... was already executed within the 24h window. "
-                f"Identical action+target+payload is a duplicate. Execution blocked."
+    if db_url:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT claim_idempotency_key(%s, %s, %s, %s, %s, %s)",
+                (idempotency_key, action_type, target, payload_hash,
+                 originating_task_id, decision_id)
             )
-        elif result == "allowed":
-            print(f"[GATE] IDEMPOTENCY: key {idempotency_key[:16]}... claimed — proceeding")
-        else:
-            # Unknown return from DB function — fail-closed
-            raise PermissionError(
-                f"[GATE] IDEMPOTENCY_CHECK_FAILED: unexpected result '{result}' — execution blocked."
-            )
-    except PermissionError:
-        raise  # re-raise our own blocks unchanged
-    except Exception as e:
-        print(f"[GATE] IDEMPOTENCY_CHECK_FAILED: {e} — BLOCKED")
-        raise PermissionError(
-            f"[GATE] IDEMPOTENCY_CHECK_FAILED: Cannot reach Supabase to check idempotency. "
-            f"Execution blocked."
+            result = cur.fetchone()[0]
+            conn.commit()
+            cur.close()
+            conn.close()
+        except PermissionError:
+            raise
+        except Exception as e:
+            print(f"[GATE] IDEMPOTENCY_CHECK_FAILED (supabase): {e} — falling back to local store")
+            result = None
+
+    if result is None:
+        from robert_store import claim_idempotency_key as local_claim
+        print(f"[GATE] IDEMPOTENCY: using local durable store (not multi-host shared)")
+        result = local_claim(
+            idempotency_key, action_type, target, payload_hash,
+            originating_task_id, decision_id,
         )
+
+    if result == "duplicate":
+        print(f"[GATE] DUPLICATE_EXECUTION_BLOCKED: key {idempotency_key[:16]}... within TTL window")
+        raise PermissionError(
+            f"[GATE] DUPLICATE_EXECUTION_BLOCKED: '{action_type}' on '{target}' "
+            f"with key {idempotency_key[:16]}... was already executed within the 24h window. "
+            f"Identical action+target+payload is a duplicate. Execution blocked."
+        )
+    if result == "allowed":
+        print(f"[GATE] IDEMPOTENCY: key {idempotency_key[:16]}... claimed — proceeding")
+        return
+    raise PermissionError(
+        f"[GATE] IDEMPOTENCY_CHECK_FAILED: unexpected result '{result}' — execution blocked."
+    )
 
 
 def _verify_approval_signature(approver_id: str, approval_type: str,
@@ -373,14 +370,21 @@ def _persist_decision(decision, execution_payload: dict = None) -> None:
         except Exception as e:
             print(f"[GATE] Persist attempt {attempt+1} failed: {e}")
 
-    # Both attempts failed
-    # FAIL-CLOSED: Phase 0 directive — if decision write fails, BLOCK execution
-    # This ensures no action proceeds without an audit record
+    # Both attempts failed.
+    # Gate 2+ / strict mode: fail-closed.
+    # Gate 1: local pending decision already saved — warn and continue.
+    gate_level = int(os.environ.get("ROBERT_GATE_LEVEL", "1"))
+    strict = os.environ.get("ROBERT_GATE_AUDIT_STRICT", "false").lower() in ("1", "true", "yes")
     _alert_gate_failure(decision.decision_id, decision.action_type)
-    raise PermissionError(
-        f"[GATE] FAIL-CLOSED: Decision {decision.decision_id} for '{decision.action_type}' "
-        f"could not be persisted to Supabase after 2 attempts. "
-        f"Execution blocked. Audit trail integrity required."
+    if gate_level >= 2 or strict:
+        raise PermissionError(
+            f"[GATE] FAIL-CLOSED: Decision {decision.decision_id} for '{decision.action_type}' "
+            f"could not be persisted to Supabase after 2 attempts. "
+            f"Execution blocked. Audit trail integrity required."
+        )
+    print(
+        f"[GATE] WARNING: Decision {decision.decision_id} not persisted to Supabase — "
+        f"continuing under Gate {gate_level} with local pending audit"
     )
 
 
@@ -408,53 +412,66 @@ def _alert_gate_failure(decision_id: str, action_type: str) -> None:
         pass
 
 
-def gate(
+
+def _compute_payload_binding(action_type: str, target: str, execution_payload: dict):
+    """Return (payload_hash, originating_task_id, idempotency_key)."""
+    payload_for_key = json.dumps({
+        "action_type": action_type,
+        "target": target or "",
+        "execution_payload": execution_payload,
+    }, sort_keys=True, separators=(',', ':'))
+    payload_hash = hashlib.sha256(payload_for_key.encode()).hexdigest()
+    originating_task_id = str(
+        execution_payload.get("originating_task_id")
+        or execution_payload.get("originating_decision_id")
+        or execution_payload.get("task", "")[:80]
+        or "unset"
+    )
+    idempotency_key = _build_idempotency_key(
+        action_type=action_type,
+        target=target or "",
+        payload_hash=payload_hash,
+        originating_task_id=originating_task_id,
+    )
+    return payload_hash, originating_task_id, idempotency_key
+
+
+def _resolve_decision(
     action_type: str,
-    target: str = "",
-    data_sensitivity: str = "internal",
-    reversible: bool = True,
-    confidence: float = 1.0,
-    content_flags: list = None,
-    execution_payload: dict = None,  # Phase 0 expanded: actual command/script/params being executed
-) -> None:
+    target: str,
+    data_sensitivity: str,
+    reversible: bool,
+    confidence: float,
+    content_flags: list,
+    execution_payload: dict,
+):
     """
-    Policy gate — call before any tool execution.
-    Raises PermissionError for RED/DENY actions.
-    Logs all decisions to Supabase.
-
-    Gate 1 behavior: GREEN/YELLOW proceed; RED/DENY raise.
-    Gate 2 will add YELLOW pause-for-approval.
+    Classify once. If execution_payload carries prior_decision_id, reuse that
+    stable decision so approvals can match across re-entry.
     """
-    check_kill_switch()
+    prior_id = str(execution_payload.get("prior_decision_id") or "").strip()
+    if prior_id:
+        from robert_store import load_pending_decision
+        from policy_engine import PolicyDecision
 
-    # RR-0056 Phase 1 — Human Node Protection
-    # Enforce before any classification or execution.
-    # DENY: raises TronixHumanNodeViolation (maps to PermissionError)
-    # ESCALATE: raises HumanEscalationRequired (maps to PermissionError)
-    if target:
-        try:
-            reject_if_human(
-                node_id=target,
-                operation=action_type,
-                agent_id="robert",
-            )
-        except TronixHumanNodeViolation as e:
-            raise PermissionError(f"[GATE] HUMAN_NODE_VIOLATION: {e}") from e
-        except HumanEscalationRequired as e:
-            raise PermissionError(f"[GATE] HUMAN_ESCALATION_REQUIRED: {e}") from e
-
-    # FAIL-CLOSED: execution_payload REQUIRED — no fallback path
-    # Must be checked before classify_action to block before any processing
-    if not execution_payload:
-        print(f"[GATE] MISSING_EXECUTION_PAYLOAD: action='{action_type}' target='{target}' — BLOCKED")
+        pending = load_pending_decision(prior_id)
+        if pending and pending.get("token_json"):
+            try:
+                decision = PolicyDecision.from_token(pending["token_json"])
+                print(f"[GATE] Reusing prior_decision_id={prior_id[:12]}... tier={decision.tier}")
+                return decision
+            except Exception as e:
+                print(f"[GATE] prior_decision_id present but token invalid: {e}")
+                raise PermissionError(
+                    f"[GATE] INVALID_PRIOR_DECISION: prior_decision_id={prior_id} "
+                    f"could not be loaded/verified. Re-submit for a new decision."
+                ) from e
         raise PermissionError(
-            f"[GATE] MISSING_EXECUTION_PAYLOAD: '{action_type}' on '{target}' cannot proceed. "
-            f"execution_payload is required for all gated executions. "
-            f"Pass execution_payload={{...}} to gate() at this call site."
+            f"[GATE] UNKNOWN_PRIOR_DECISION: prior_decision_id={prior_id} "
+            f"not found or expired. Request a fresh classification."
         )
 
-    # STEP 1: Classify (no side effects — pure risk assessment)
-    decision = classify_action(
+    return classify_action(
         action_type=action_type,
         target=target,
         data_sensitivity=data_sensitivity,
@@ -464,71 +481,148 @@ def gate(
         content_flags=content_flags or [],
     )
 
-    # STEP 2: Sign the decision token (no side effects)
-    token = decision.to_token()
-    import json as _json
-    payload = _json.loads(token)
-    decision.signature = payload.get("signature")
 
-    # STEP 3: Compute payload_hash (no side effects)
-    _payload_for_key = json.dumps({
-        "action_type": action_type,
-        "target": target or "",
-        "execution_payload": execution_payload,
-    }, sort_keys=True, separators=(',', ':'))
-    _payload_hash = hashlib.sha256(_payload_for_key.encode()).hexdigest()
-    _originating_task_id = str(execution_payload.get("originating_task_id") or
-                               execution_payload.get("originating_decision_id") or
-                               execution_payload.get("task", "")[:80] or
-                               "unset")
-    _idempotency_key = _build_idempotency_key(
+def gate(
+    action_type: str,
+    target: str = "",
+    data_sensitivity: str = "internal",
+    reversible: bool = True,
+    confidence: float = 1.0,
+    content_flags: list = None,
+    execution_payload: dict = None,
+    resource_target: str = "",
+) -> None:
+    """
+    Policy gate — call before any tool execution.
+
+    Lifecycle (load-bearing order):
+      1. kill switch + human-node check
+      2. require execution_payload
+      3. resolve stable decision (prior_decision_id or classify once)
+      4. sign decision
+      5. bind payload hash
+      6. DENY → block (no claim)
+      7. YELLOW/RED → approval path BEFORE idempotency claim
+      8. claim idempotency
+      9. persist decision / pending token for later approval matching
+      10. allow caller to execute
+
+    Gate level:
+      ROBERT_GATE_LEVEL=1 (default): YELLOW proceeds after logging; RED blocked
+        with a stable prior_decision_id for approved retry.
+      ROBERT_GATE_LEVEL>=2: full quorum enforcement for YELLOW/RED.
+    """
+    check_kill_switch()
+
+    # Separate node_id (human protection) from resource_target (file/path/etc).
+    node_for_human_check = target
+    if resource_target and not target:
+        node_for_human_check = ""
+
+    if node_for_human_check:
+        try:
+            reject_if_human(
+                node_id=node_for_human_check,
+                operation=action_type,
+                agent_id="robert",
+            )
+        except TronixHumanNodeViolation as e:
+            raise PermissionError(f"[GATE] HUMAN_NODE_VIOLATION: {e}") from e
+        except HumanEscalationRequired as e:
+            raise PermissionError(f"[GATE] HUMAN_ESCALATION_REQUIRED: {e}") from e
+
+    if not execution_payload:
+        print(f"[GATE] MISSING_EXECUTION_PAYLOAD: action='{action_type}' target='{target}' — BLOCKED")
+        raise PermissionError(
+            f"[GATE] MISSING_EXECUTION_PAYLOAD: '{action_type}' on '{target}' cannot proceed. "
+            f"execution_payload is required for all gated executions. "
+            f"Pass execution_payload={{...}} to gate() at this call site."
+        )
+
+    effective_target = resource_target or target
+
+    decision = _resolve_decision(
         action_type=action_type,
-        target=target or "",
-        payload_hash=_payload_hash,
-        originating_task_id=_originating_task_id,
+        target=effective_target,
+        data_sensitivity=data_sensitivity,
+        reversible=reversible,
+        confidence=confidence,
+        content_flags=content_flags or [],
+        execution_payload=execution_payload,
     )
 
-    # STEP 4: RED/DENY block — before any DB write or idempotency claim
-    # A RED/DENY action must never consume an idempotency slot or produce an audit record
-    # that implies it was evaluated for execution.
-    if decision.tier == RiskTier.RED.value:
-        raise PermissionError(
-            f"[GATE] RED action blocked: '{action_type}' on '{target}'. "
-            f"Requires 3 approvals from Chris. Escalate via Telegram."
-        )
+    token = decision.to_token()
+    payload = json.loads(token)
+    decision.signature = payload.get("signature")
+
+    payload_hash, originating_task_id, idempotency_key = _compute_payload_binding(
+        action_type, effective_target, execution_payload
+    )
+
     if decision.tier == RiskTier.DENY.value:
         raise PermissionError(
             f"[GATE] DENY: '{action_type}' blocked. Reason: {decision.deny_reason}"
         )
 
-    # STEP 5: Idempotency check — AFTER classification, BEFORE persist or execution
-    # If this raises, nothing has been written to Supabase and no execution has occurred.
+    gate_level = int(os.environ.get("ROBERT_GATE_LEVEL", "1"))
+
+    # Persist pending decision BEFORE approval/idempotency so retries can reuse id
+    try:
+        from robert_store import save_pending_decision
+        from datetime import datetime, timezone
+
+        try:
+            expires_epoch = datetime.fromisoformat(
+                decision.expires_at.replace("Z", "+00:00")
+            ).timestamp()
+        except Exception:
+            expires_epoch = datetime.now(timezone.utc).timestamp() + 1800
+        save_pending_decision(
+            decision_id=decision.decision_id,
+            action_type=decision.action_type,
+            target=decision.target or "",
+            tier=decision.tier,
+            payload_hash=payload_hash,
+            token_json=token,
+            expires_at_epoch=expires_epoch,
+        )
+    except Exception as e:
+        print(f"[GATE] WARNING: could not save pending decision locally: {e}")
+
+    if decision.tier in (RiskTier.YELLOW.value, RiskTier.RED.value):
+        if gate_level >= 2:
+            _check_approvals(
+                decision_id=decision.decision_id,
+                payload_hash=payload_hash,
+                tier=decision.tier,
+                action_type=action_type,
+                target=effective_target or "",
+            )
+        elif decision.tier == RiskTier.RED.value:
+            raise PermissionError(
+                f"[GATE] RED action blocked: '{action_type}' on '{effective_target}'. "
+                f"Requires approvals. Re-invoke with "
+                f"execution_payload.prior_decision_id={decision.decision_id} after approval. "
+                f"Escalate via Telegram."
+            )
+        else:
+            print(
+                f"[GATE] YELLOW: '{action_type}' proceeding under Gate {gate_level} "
+                f"(id={decision.decision_id[:8]}). Gate 2 will require approval."
+            )
+
     _check_and_claim_idempotency(
-        idempotency_key=_idempotency_key,
+        idempotency_key=idempotency_key,
         action_type=action_type,
-        target=target or "",
-        payload_hash=_payload_hash,
-        originating_task_id=_originating_task_id,
+        target=effective_target or "",
+        payload_hash=payload_hash,
+        originating_task_id=originating_task_id,
         decision_id=decision.decision_id,
     )
 
-    # STEP 6: Approval quorum check — AFTER idempotency, BEFORE persist or execution
-    # Gate 1: logs only. Gate 2+: enforces quorum.
-    # Approval must match _payload_hash (hash binding, not decision_id alone).
-    _check_approvals(
-        decision_id=decision.decision_id,
-        payload_hash=_payload_hash,
-        tier=decision.tier,
-        action_type=action_type,
-        target=target or "",
-    )
-
-    # STEP 7: Persist decision record — after all guards pass
-    # At this point: not duplicate, not RED/DENY, approvals verified.
     _persist_decision(decision, execution_payload=execution_payload)
 
-    # STEP 8: Return to caller — execution may proceed
-    if decision.tier == RiskTier.YELLOW.value:
-        print(f"[GATE] YELLOW: '{action_type}' proceeding (Gate 2 will require approval)")
-
-    print(f"[GATE] {decision.tier}: '{action_type}' -> '{target}' approved (id={decision.decision_id[:8]})")
+    print(
+        f"[GATE] {decision.tier}: '{action_type}' -> '{effective_target}' "
+        f"approved (id={decision.decision_id[:8]})"
+    )
