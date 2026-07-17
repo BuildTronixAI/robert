@@ -6,7 +6,7 @@ import urllib.request
 import urllib.error
 from typing import Optional
 
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "re_RL675fpM_GuSaEdBwwx99ZYqzU2TaJxt8")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")  # Must be set in environment
 RESEND_BASE_URL = "https://api.resend.com/emails"
 
 
