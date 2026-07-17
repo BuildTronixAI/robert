@@ -52,12 +52,11 @@ def safe_fetch(
                 raise ValueError(f"Response exceeds max_bytes={max_bytes}")
             return resp.status, body, dict(resp.headers)
     except urllib.error.HTTPError as e:
-        err_body = e.read(4096) if hasattr(e, "read") else b""
-        raise urllib.error.HTTPError(
-            e.url, e.code, sanitize_error(e.reason or ""), e.headers, None
-        ) from None
+        raise
+    except ValueError:
+        raise
     except Exception as e:
-        raise type(e)(sanitize_error(str(e))) from e
+        raise RuntimeError(sanitize_error(str(e))) from e
 
 
 def safe_fetch_json(url: str, **kwargs) -> tuple[int, dict]:

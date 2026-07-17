@@ -162,12 +162,17 @@ Precon (GC estimating product) lives in this repo but is **not** part of the Rob
 | Phase | Status | Focus |
 |-------|--------|--------|
 | A — Runtime spine | Done | Listener durability, orchestrator, graph retries, mesh v2, exec/memory |
-| B — Governance | In progress | Stable policy decisions, approvals before idempotency, durable nonce/idempotency store, actor JWT in state |
-| C — Tool boundary | Next | Every mutating tool calls `gate()`; `safe_fetch` on all HTTP; user JWT for RLS reads |
-| D — Mesh Phase C | Later | Externally committed results, outbound BOB delegation, shared nonce table in Supabase |
+| B — Governance | Done | Stable policy decisions, approvals before idempotency, durable nonce/idempotency store, actor JWT in state |
+| C — Tool boundary | Done | Mutating tools call `gate()`; HTTP via `safe_fetch`; RLS reads prefer actor JWT (`user_client`) |
+| D — Mesh Phase C | Next | Externally committed results, outbound BOB delegation, shared nonce table in Supabase |
 | E — Precon | Separate | Auth on API, wire ReviewLayerGateEngine, no mock auto-seed in prod |
 
 **Done when:** Gate 2 quorum enforced in prod, mesh nonces shared across hosts, no service-key bypass for user data paths, Precon not required for COO completeness.
+
+### Phase C notes
+- Set `SUPABASE_ANON_KEY` for correct `apikey` + user JWT `Authorization` (falls back to service key if unset).
+- `tools.actor_context` binds actor JWT for the duration of `run_task`.
+- Listener/notify Telegram sends may use `skip_gate=True` (already authorized upstream).
 
 ## License
 
