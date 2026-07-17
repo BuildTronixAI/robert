@@ -55,11 +55,10 @@ def _handle_mesh_task_sync(text: str, chat_id: str) -> None:
     if _mesh_receiver is None:
         log("[D11] Mesh receiver not initialized — dropping task")
         return
+    import asyncio as _a
+    loop = _a.new_event_loop()
     try:
-        import asyncio as _a
-        loop = _a.new_event_loop()
         result = loop.run_until_complete(_mesh_receiver.receive(text.encode()))
-        loop.close()
         state = result.get("state", "unknown")
         task_id = result.get("task_id", "?")[:8]
         # Phase B enforcement: abort if anything claims EXTERNALLY_COMMITTED
@@ -69,6 +68,11 @@ def _handle_mesh_task_sync(text: str, chat_id: str) -> None:
         log(f"[D11] Mesh task complete: state={state} task_id={task_id}...")
     except Exception as e:
         log(f"[D11] Mesh task error: {e}")
+    finally:
+        try:
+            loop.close()
+        except Exception:
+            pass
 # ── End D11 ──────────────────────────────────────────────────────────────────
 
 
@@ -78,6 +82,11 @@ from config import ROBERT_BOT_TOKEN, TELEGRAM_CHAT_ID
 import memory_store
 from policy_engine import check_kill_switch
 from auth.jwt_minter import resolve_identity_and_mint, IdentityNotFoundError, JWTMintError
+from auth.permissions import check_permission
+from startup_preconditions import check_startup_preconditions, StartupState
+
+# Module-level startup state — set in run(); tools may import for degraded gates
+STARTUP_STATE: StartupState | None = None
 
 CHRIS_USER_ID = 8480371994
 ROBERT_BOT_ID = None
@@ -322,8 +331,12 @@ def send(text):
     return result
 
 def get_updates(offset):
-    """Long poll for updates. Blocks up to 30s waiting for messages."""
-    params = {"timeout": 30, "limit": 10, "allowed_updates": ["message"]}
+    """Long poll for updates. Blocks up to 30s waiting for messages + callbacks."""
+    params = {
+        "timeout": 30,
+        "limit": 10,
+        "allowed_updates": ["message", "callback_query"],
+    }
     if offset > 0:
         params["offset"] = offset
     result, err = api_call(ROBERT_BOT_TOKEN, "getUpdates", params, timeout=35)
@@ -331,6 +344,17 @@ def get_updates(offset):
         log(f"Poll error: {err}")
         return []
     return result.get("result", []) if result else []
+
+
+def _handle_callback_query(callback: dict) -> None:
+    """Dispatch Telegram inline-button approvals to BOB contract handler."""
+    try:
+        from bob_contract import handle_callback
+        handle_callback(callback)
+        log(f"[callback] Handled callback_query id={callback.get('id')}")
+    except Exception as e:
+        log(f"[callback] handle_callback failed: {e}")
+        alert_chris(f"Approval callback failed: {str(e)[:200]}")
 
 def process(text, from_name, chat_id="default"):
     """Run task through Robert's graph."""
@@ -360,9 +384,16 @@ def process(text, from_name, chat_id="default"):
 def run():
     global _last_success_ts, _silence_alerted
     global ROBERT_BOT_ID
+    global STARTUP_STATE
     
     cleanup_checkpoints()
     log("Starting Phase 3 listener")
+
+    # Constitutional startup preconditions (git dirty + audit RPC)
+    STARTUP_STATE = check_startup_preconditions()
+    log(STARTUP_STATE.as_summary())
+    if STARTUP_STATE.degraded:
+        log("[startup] DEGRADED MODE active — constitutional writes blocked")
     
     # Get bot info
     result, err = api_call(ROBERT_BOT_TOKEN, "getMe")
@@ -388,7 +419,10 @@ def run():
     except (FileNotFoundError, ValueError, OSError):
         last_announced = 0  # Treat as never announced
     if now - last_announced > 3600:
-        send("Robert online. Sonnet loaded. Listening.")
+        boot_msg = "Robert online. Sonnet loaded. Listening."
+        if STARTUP_STATE and STARTUP_STATE.degraded:
+            boot_msg += "\n\nDEGRADED MODE: " + (STARTUP_STATE.degraded_reason or "see logs")
+        send(boot_msg)
         # Write — non-fatal if fails
         try:
             _throttle_path.write_text(str(now))
@@ -401,8 +435,20 @@ def run():
             
             for update in updates:
                 update_id = update.get("update_id", 0)
-                offset = update_id + 1
-                memory_store.set_telegram_offset(offset)
+                next_offset = update_id + 1
+                # Advance in-memory offset for polling continuity; persist only after
+                # successful handling so a crash mid-task can redeliver.
+                offset = next_offset
+
+                # Inline approval callbacks (Approve / Reject buttons)
+                callback = update.get("callback_query")
+                if callback:
+                    try:
+                        _handle_callback_query(callback)
+                        memory_store.set_telegram_offset(next_offset)
+                    except Exception as cb_err:
+                        log(f"[callback] Failed without advancing durable offset: {cb_err}")
+                    continue
                 
                 msg = update.get("message", {})
                 if not msg:
@@ -411,11 +457,13 @@ def run():
                         "unknown"
                     )
                     log(f"[Robert] Skipping non-message update type: {update_type}")
+                    memory_store.set_telegram_offset(next_offset)
                     continue
 
                 chat_id = str(msg.get("chat", {}).get("id", ""))
                 if not chat_id:
                     log(f"[Robert] Skipping update with message but no chat.id (update_id={update.get('update_id', 'unknown')})")
+                    memory_store.set_telegram_offset(next_offset)
                     continue
 
                 from_user = msg.get("from", {})
@@ -427,22 +475,31 @@ def run():
                 CHRIS_DIRECT_ID = "8480371994"
                 if chat_id != str(TELEGRAM_CHAT_ID) and chat_id != CHRIS_DIRECT_ID:
                     log(f'[DROP][CHAT_FILTER] Wrong chat_id: got {chat_id}')
+                    memory_store.set_telegram_offset(next_offset)
                     continue
                 # For direct messages, reply to the DM chat not the group
                 reply_chat_id = chat_id if chat_id == CHRIS_DIRECT_ID else TELEGRAM_CHAT_ID
                 
                 # Skip empty messages
                 if not text:
+                    memory_store.set_telegram_offset(next_offset)
                     continue
                 
                 # Skip bots UNLESS signed mesh task from BOB (D11 Phase B)
                 if from_user.get("is_bot", False):
                     if _is_mesh_task(text):
-                        _handle_mesh_task_sync(text, chat_id)
+                        try:
+                            _handle_mesh_task_sync(text, chat_id)
+                            memory_store.set_telegram_offset(next_offset)
+                        except Exception as mesh_err:
+                            log(f"[D11] Mesh handling failed — offset not advanced: {mesh_err}")
+                    else:
+                        memory_store.set_telegram_offset(next_offset)
                     continue
                 
                 # Skip Robert's own messages
                 if from_id == ROBERT_BOT_ID:
+                    memory_store.set_telegram_offset(next_offset)
                     continue
                 
                 log(f"Message from {from_name} ({from_id}): {text[:60]}")
@@ -450,6 +507,7 @@ def run():
                 # Only respond to Chris
                 if from_id != CHRIS_USER_ID:
                     log(f"Ignoring — not Chris (got {from_id})")
+                    memory_store.set_telegram_offset(next_offset)
                     continue
 
                 # RR-0059-rev7: Input normalization
@@ -465,12 +523,30 @@ def run():
                     delivered = _send_with_fallback(reply_chat_id,
                         'Hey — what do you need? Give me a task or question.')
                     _record_delivery_result(delivered, reply_chat_id)
+                    memory_store.set_telegram_offset(next_offset)
                     continue
 
                 # Too short and not a recognized command — silent drop (accidental send)
                 if len(text.strip()) < 4 and not looks_like_command:
                     log(f'[DROP][TOO_SHORT] {text!r}')
+                    memory_store.set_telegram_offset(next_offset)
                     continue
+
+                # Rate limit Telegram-driven work
+                try:
+                    from limits import get_limiter
+                    allowed, reason = get_limiter().check_telegram()
+                    if not allowed:
+                        hits = get_limiter().record_rate_limit_hit()
+                        log(f"[limits] Telegram rate limited: {reason} (hits={hits})")
+                        api_call(ROBERT_BOT_TOKEN, "sendMessage", {
+                            "chat_id": reply_chat_id,
+                            "text": f"Rate limit: {reason}"
+                        })
+                        memory_store.set_telegram_offset(next_offset)
+                        continue
+                except Exception as lim_err:
+                    log(f"[limits] Limiter error — fail-open: {lim_err}")
 
                 # Phase 1: Identity resolution + JWT minting
                 jwt_token = None
@@ -481,14 +557,29 @@ def run():
                 except IdentityNotFoundError as e:
                     log(f"[auth] Identity not found for {from_id}: {e}")
                     alert_chris(f"Identity resolution failed for Telegram user {from_id} — not in profiles table. Message dropped.")
+                    memory_store.set_telegram_offset(next_offset)
                     continue
                 except JWTMintError as e:
                     log(f"[auth] JWT mint failed: {e}")
                     alert_chris(f"JWT mint error — SUPABASE_JWT_SECRET missing or invalid. Message dropped.")
+                    memory_store.set_telegram_offset(next_offset)
                     continue
                 except Exception as e:
                     log(f"[auth] Identity resolution error: {e}")
                     alert_chris(f"Unexpected identity resolution error: {str(e)[:200]}. Message dropped.")
+                    memory_store.set_telegram_offset(next_offset)
+                    continue
+
+                # Phase 2: Role-based permission enforcement
+                role = identity_profile.get("role", "GUEST")
+                allowed, deny_reason = check_permission(role, text)
+                if not allowed:
+                    log(f"[auth] Permission denied role={role}: {deny_reason}")
+                    api_call(ROBERT_BOT_TOKEN, "sendMessage", {
+                        "chat_id": reply_chat_id,
+                        "text": f"Permission denied: {deny_reason}"
+                    })
+                    memory_store.set_telegram_offset(next_offset)
                     continue
 
                 # Typing indicator — send immediately, replace with answer
@@ -510,6 +601,7 @@ def run():
                             api_call(ROBERT_BOT_TOKEN, "editMessageText", {"chat_id": reply_chat_id, "message_id": pending_msg_id, "text": "WARNING: Approval required:\n\n" + block_reason + "\n\nReply approve or cancel."})
                         else:
                             api_call(ROBERT_BOT_TOKEN, "sendMessage", {"chat_id": reply_chat_id, "text": "WARNING: Approval required:\n\n" + block_reason + "\n\nReply approve or cancel."})
+                        memory_store.set_telegram_offset(next_offset)
                         continue
                     if orch_result.get("combined_flags"):
                         log(f"[orchestrator] {len(orch_result['combined_flags'])} non-blocking flags")
@@ -548,10 +640,12 @@ def run():
                     if reply_status is None:
                         log('[PROTOCOL] reply_status missing — producer bug, defaulting to FAILURE')
                         _handle_protocol_violation(reply_chat_id, pending_msg_id, 'missing_reply_status')
+                        memory_store.set_telegram_offset(next_offset)
                         continue
                     elif reply_status not in ('SUCCESS_REPLY', 'SUCCESS_NO_REPLY', 'FAILURE'):
                         log(f'[PROTOCOL] Unknown reply_status={reply_status!r} — defaulting to FAILURE')
                         _handle_protocol_violation(reply_chat_id, pending_msg_id, f'unknown:{reply_status}')
+                        memory_store.set_telegram_offset(next_offset)
                         continue
                     if not output:
                         if reply_status == 'SUCCESS_NO_REPLY':
@@ -576,11 +670,13 @@ def run():
                                     "chat_id": reply_chat_id,
                                     "message_id": pending_msg_id
                                 })
+                        memory_store.set_telegram_offset(next_offset)
                         continue
                     # Replace the pending indicator with the real answer
                     delivered = _send_with_fallback(reply_chat_id, output, pending_msg_id)
                     _record_delivery_result(delivered, reply_chat_id)
                     log("Response sent.")
+                    memory_store.set_telegram_offset(next_offset)
                 except Exception as e:
                     log(f"Process error: {e}")
                     err_text = f"Error processing task: {str(e)[:200]}"
@@ -593,6 +689,9 @@ def run():
                         })
                     else:
                         api_call(ROBERT_BOT_TOKEN, "sendMessage", {"chat_id": reply_chat_id, "text": err_text})
+                    # Persist offset after user was notified — avoids infinite redelivery loops.
+                    # Crash before this line leaves offset unadvanced for redelivery.
+                    memory_store.set_telegram_offset(next_offset)
                 else:
                     # Task succeeded at listener level — check reviewer verdict before
                     # updating silence tracker (RR-0028: reviewer escalation = task failure)

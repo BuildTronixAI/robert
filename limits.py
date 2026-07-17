@@ -108,16 +108,12 @@ class RateLimiter:
 
 
 def write_default_limits():
-    """Write default limits file with backup + atomic write (RR-0014 + RR-0013)."""
-    if not os.path.exists(LIMITS_FILE):
-        os.makedirs(os.path.dirname(LIMITS_FILE), exist_ok=True)
-        # No backup on first-time write (backup_before_write guards nonexistent files)
-        atomic_write(LIMITS_FILE, json.dumps(DEFAULT_LIMITS, indent=2))
-    else:
-        basename = os.path.basename(LIMITS_FILE)
-        retention = CRITICAL_RETENTION_DAYS if basename in CRITICAL_FILES else STANDARD_RETENTION_DAYS
-        backup_before_write(LIMITS_FILE, BACKUP_DIR_ROBERT, retention_days=retention)
-        atomic_write(LIMITS_FILE, json.dumps(DEFAULT_LIMITS, indent=2))
+    """Write default limits file only if missing — never clobber operator config."""
+    if os.path.exists(LIMITS_FILE):
+        return
+    os.makedirs(os.path.dirname(LIMITS_FILE), exist_ok=True)
+    # No backup on first-time write (backup_before_write guards nonexistent files)
+    atomic_write(LIMITS_FILE, json.dumps(DEFAULT_LIMITS, indent=2))
 
 
 # Singleton

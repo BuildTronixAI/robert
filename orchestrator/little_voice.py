@@ -25,7 +25,6 @@ import sys
 import time
 import datetime
 from typing import List, Dict, Any, Optional
-import anthropic
 
 
 # ── Setup Logging ──────────────────────────────────────────────────
@@ -225,6 +224,12 @@ class LittleVoice:
     ) -> List[Dict[str, Any]]:
         """Call Anthropic Haiku 4.5 to evaluate the action's appropriateness with v1.1 schema."""
         
+        try:
+            import anthropic
+        except ImportError:
+            _log("anthropic not installed — skipping Haiku check (fail-open)")
+            return []
+
         client = anthropic.Anthropic(api_key=self.api_key)
         
         # Prepare context
@@ -359,6 +364,36 @@ Check the action against all 8 items and return the JSON list with source_type a
         except json.JSONDecodeError as e:
             _log(f"JSON parse error from Haiku: {e}")
             return []
-        except anthropic.APIError as e:
+        except Exception as e:
+            # Includes anthropic.APIError and transport failures
             _log(f"Anthropic API error: {e}")
             return []
+
+
+# ── Module-level wrapper (called by orchestrator/stack.py) ────────────────────
+_lv_instance = LittleVoice(timeout_sec=5)
+
+
+def run_little_voice(text: str, identity_profile: Optional[Dict[str, Any]] = None, context: str = "") -> dict:
+    """
+    Module-level wrapper for orchestrator/stack.py compatibility.
+    Accepts task text + identity + optional context, returns dict with 'flags' key.
+    """
+    ctx: Dict[str, Any] = {
+        "timestamp": time.time(),
+        "identity": identity_profile or {},
+    }
+    if isinstance(context, dict):
+        ctx.update(context)
+    elif isinstance(context, str) and context:
+        ctx["raw_context"] = context
+        ctx["memory_entries"] = [context[:2000]]
+
+    # Heuristic context for structured pre-checks (timing / money)
+    lowered = (text or "").lower()
+    ctx.setdefault("is_external", any(k in lowered for k in ("email", "send", "post", "telegram", "publish")))
+    ctx.setdefault("is_irreversible", any(k in lowered for k in ("delete", "drop", "commit", "deploy", "wire", "transfer")))
+    ctx.setdefault("involves_money", any(k in lowered for k in ("invoice", "payment", "budget", "payroll", "$", "usd")))
+
+    flags = _lv_instance.check(text or "", ctx)
+    return {"flags": flags}

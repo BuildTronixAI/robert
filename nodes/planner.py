@@ -206,7 +206,8 @@ def planner(state: RobertState) -> RobertState:
         state["is_finance_task"] = is_finance
         state["is_coding_task"] = is_coding
         state["task_type"] = task_type
-        state["iteration_count"] = state.get("iteration_count", 0) + 1
+        # iteration_count is owned exclusively by reviewer (retry loop counter).
+        # Planner must not increment it — double-counting short-circuits retries.
         state["task"] = state["current_task"]  # RR-0022: reviewer reads 'task', not 'current_task'
         return state
 

@@ -11,10 +11,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from state import RobertState
 from config import ROBERT_EXEC_MODEL as ROBERT_MODEL, OPENROUTER_API_KEY, OPENROUTER_BASE_URL
 # Coder uses Haiku — writing/running code is execution, not strategy
-from tools.exec_tool import run_command
+from tools.exec_tool import run_command, run_argv
 from policy_gate import gate
+from config import WORKSPACE_PATH
 
-WORKSPACE = "/root/.openclaw/workspace"
+WORKSPACE = WORKSPACE_PATH
 MAX_ITERATIONS = 4
 
 CODER_PROMPT = """You are Robert, a coding agent for Buildtronix AI Corp.
@@ -97,26 +98,28 @@ def extract_code(text: str) -> tuple[str, str]:
     return "", ""
 
 def run_code(code: str, lang: str) -> dict:
-    """Write code to temp file and execute it."""
+    """Write code to temp file and execute it without shell interpolation."""
     if not code:
         return {"stdout": "", "stderr": "No code to run", "returncode": -1}
     
     suffix = ".py" if lang == "python" else ".sh"
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix=suffix, delete=False) as f:
+    os.makedirs(WORKSPACE, exist_ok=True)
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix=suffix, delete=False, dir=WORKSPACE) as f:
         f.write(code)
         tmp_path = f.name
     
     try:
         if lang == "python":
-            cmd = f"python3 {tmp_path}"
+            argv = ["python3", tmp_path]
         else:
-            cmd = f"bash {tmp_path}"
-        
-        result = run_command(cmd, timeout=60)
-        return result
+            argv = ["bash", tmp_path]
+        return run_argv(argv, timeout=60, cwd=WORKSPACE)
     finally:
-        os.unlink(tmp_path)
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 def commit_to_git(filepath: str, message: str, originating_decision_id: str = None) -> dict:
     """Commit a file to git — GATED. Permanent state change requires gate approval."""
@@ -134,15 +137,17 @@ def commit_to_git(filepath: str, message: str, originating_decision_id: str = No
             "originating_decision_id": originating_decision_id,
         }
     )
-    result = run_command(f"cd {WORKSPACE} && git add {filepath} && git commit -m '{message}'")
-    return result
+    add = run_argv(["git", "add", "--", filepath], timeout=30, cwd=WORKSPACE)
+    if add["returncode"] != 0:
+        return add
+    return run_argv(["git", "commit", "-m", message], timeout=30, cwd=WORKSPACE)
 
 def _generate_tests(task: str, design_doc: str, client) -> tuple[str, str]:
     """Generate pytest test cases before implementation."""
     import re as _re
     from pathlib import Path
     slug = _re.sub(r'[^a-z0-9]+', '_', task[:40].lower()).strip('_')
-    test_file = f"/var/lib/robert/workspace/tests/test_{slug}.py"
+    test_file = os.path.join(WORKSPACE, "tests", f"test_{slug}.py")
 
     test_prompt = f"""You are Robert — senior engineer. Write pytest test cases for this task BEFORE implementation.
 
@@ -164,7 +169,7 @@ Output only the Python test code in a ```python block. No explanation."""
     ])
     code, _ = extract_code(response.content)
     if code:
-        Path("/var/lib/robert/workspace/tests").mkdir(exist_ok=True)
+        Path(os.path.join(WORKSPACE, "tests")).mkdir(parents=True, exist_ok=True)
         with open(test_file, 'w') as f:
             f.write(code)
         print(f"[CODER] Test file written: {test_file}")
@@ -177,7 +182,7 @@ def _run_tests(test_file: str) -> dict:
     try:
         result = subprocess.run(
             ["python3", "-m", "pytest", test_file, "-v", "--tb=short", "--timeout=30"],
-            capture_output=True, text=True, timeout=60
+            capture_output=True, text=True, timeout=60, cwd=WORKSPACE
         )
         passed = result.stdout.count(" PASSED")
         failed = result.stdout.count(" FAILED")
@@ -295,7 +300,12 @@ def coder(state: RobertState) -> RobertState:
                                 "code_preview": last_code[:300],
                             }
                         )
-                        commit_result = run_command(f"cd {WORKSPACE} && git add -A && git commit -m \"{commit_msg}\"")
+                        add_result = run_argv(["git", "add", "-A"], timeout=30, cwd=WORKSPACE)
+                        commit_result = run_argv(
+                            ["git", "commit", "-m", commit_msg],
+                            timeout=30,
+                            cwd=WORKSPACE,
+                        ) if add_result["returncode"] == 0 else add_result
                         if commit_result["returncode"] == 0:
                             state["result"] += f"\n\n✅ Committed to git."
                     except PermissionError as e:

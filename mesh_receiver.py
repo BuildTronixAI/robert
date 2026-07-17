@@ -41,6 +41,11 @@ logger = logging.getLogger(__name__)
 
 # Task TTL: reject tasks older than this (seconds)
 TASK_TTL_SECONDS = 300  # 5 minutes
+# Absolute ceiling — never trust a larger per-message ttl_seconds
+MAX_TTL_SECONDS = TASK_TTL_SECONDS
+
+# Mesh signing contract version — fields covered by Ed25519 signature
+MESH_SIGNING_VERSION = 2
 
 # Nonce window: how long nonces are tracked to prevent replay
 NONCE_WINDOW_SECONDS = 600  # 10 minutes
@@ -89,7 +94,8 @@ class MeshTask:
         "signature": "<base64-encoded Ed25519 signature>"
     }
     
-    Signature covers: task_id ‖ sender_id ‖ payload_hash ‖ nonce ‖ issued_at
+    Signature v2 covers:
+      v ‖ task_id ‖ sender_id ‖ task_type ‖ payload_hash ‖ nonce ‖ issued_at ‖ ttl_seconds
     """
     task_id: str
     sender_id: str
@@ -117,6 +123,14 @@ class MeshTask:
         missing = [f for f in required if f not in data]
         if missing:
             raise MeshSchemaError(f"Missing required fields: {missing}")
+
+        ttl = int(data["ttl_seconds"])
+        if ttl <= 0:
+            raise MeshSchemaError("ttl_seconds must be positive")
+        if ttl > MAX_TTL_SECONDS:
+            raise MeshSchemaError(
+                f"ttl_seconds {ttl} exceeds MAX_TTL_SECONDS={MAX_TTL_SECONDS}"
+            )
         
         return cls(
             task_id=data["task_id"],
@@ -126,28 +140,34 @@ class MeshTask:
             payload_hash=data["payload_hash"],
             nonce=data["nonce"],
             issued_at=float(data["issued_at"]),
-            ttl_seconds=int(data["ttl_seconds"]),
+            ttl_seconds=ttl,
             signature=data["signature"],
             received_at=time.time(),
         )
 
     def signing_message(self) -> bytes:
         """
-        Reconstruct the message that was signed.
-        signature covers: task_id ‖ sender_id ‖ payload_hash ‖ nonce ‖ issued_at
+        Reconstruct the message that was signed (MESH_SIGNING_VERSION=2).
+        Covers task_type and ttl_seconds so neither can be mutated in transit.
         """
         msg = json.dumps({
+            "v": MESH_SIGNING_VERSION,
             "task_id": self.task_id,
             "sender_id": self.sender_id,
+            "task_type": self.task_type,
             "payload_hash": self.payload_hash,
             "nonce": self.nonce,
             "issued_at": self.issued_at,
+            "ttl_seconds": self.ttl_seconds,
         }, sort_keys=True, separators=(',', ':')).encode()
         return msg
 
     def is_expired(self) -> bool:
-        """Check if task TTL has elapsed."""
-        return (time.time() - self.issued_at) > self.ttl_seconds
+        """Check if task TTL has elapsed (also reject far-future issued_at)."""
+        now = time.time()
+        if self.issued_at > now + 60:
+            return True  # clock skew / forged future timestamp
+        return (now - self.issued_at) > self.ttl_seconds
 
     def verify_payload_hash(self) -> bool:
         """Verify payload hash matches actual payload."""
@@ -305,11 +325,11 @@ class MeshReceiver:
 
     async def _validate(self, task: MeshTask) -> None:
         """
-        Full validation sequence:
-        1. TTL check (DB clock authoritative)
-        2. Nonce check (replay prevention)
-        3. Payload hash check
-        4. Ed25519 signature verification
+        Full validation sequence (order is load-bearing):
+        1. TTL check
+        2. Payload hash check
+        3. Ed25519 signature verification
+        4. Nonce claim (only after authenticity proven — invalid msgs must not burn nonces)
         """
         # 1. TTL
         if task.is_expired():
@@ -318,47 +338,48 @@ class MeshReceiver:
                 f"(issued={task.issued_at:.0f} ttl={task.ttl_seconds}s "
                 f"age={(time.time()-task.issued_at):.0f}s)"
             )
-        
-        # 2. Nonce (replay prevention)
-        self._nonce_store.check_and_record(task.nonce)
-        
-        # 3. Payload hash
+
+        # 2. Payload hash
         if not task.verify_payload_hash():
             raise MeshAuthError(
                 f"Payload hash mismatch for task {task.task_id} — "
                 "payload may have been tampered in transit"
             )
-        
-        # 4. Ed25519 signature
+
+        # 3. Ed25519 signature (fail-closed if cryptography unavailable)
         self._verify_signature(task)
+
+        # 4. Nonce (replay prevention) — claim only after authenticity proven
+        self._nonce_store.check_and_record(task.nonce)
 
     def _verify_signature(self, task: MeshTask) -> None:
         """
         Verify Ed25519 signature using BOB's PUBLIC key.
         Robert never holds BOB's private key.
+        Fail-closed if cryptography is not installed.
         """
         try:
             from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
             from cryptography.exceptions import InvalidSignature
-            
-            public_key = Ed25519PublicKey.from_public_bytes(self._bob_public_key)
-            signature_bytes = base64.b64decode(task.signature)
-            message = task.signing_message()
-            
-            try:
-                public_key.verify(signature_bytes, message)
-            except InvalidSignature:
-                raise MeshAuthError(
-                    f"Ed25519 signature invalid for task {task.task_id} "
-                    f"from sender {task.sender_id}"
-                )
-                
-        except ImportError:
-            # cryptography library not available — use fallback verification
-            # In production, cryptography must be installed
-            logger.warning(
-                "cryptography library not available — "
-                "Ed25519 verification skipped (INSECURE — install cryptography)"
+        except ImportError as e:
+            raise MeshAuthError(
+                "cryptography library not available — Ed25519 verification "
+                "is mandatory (fail-closed). Install cryptography."
+            ) from e
+
+        public_key = Ed25519PublicKey.from_public_bytes(self._bob_public_key)
+        try:
+            signature_bytes = base64.b64decode(task.signature, validate=True)
+        except Exception as e:
+            raise MeshAuthError(f"Invalid signature encoding for task {task.task_id}") from e
+        message = task.signing_message()
+
+        try:
+            public_key.verify(signature_bytes, message)
+        except InvalidSignature:
+            raise MeshAuthError(
+                f"Ed25519 signature invalid for task {task.task_id} "
+                f"from sender {task.sender_id}"
             )
 
     async def _execute(self, task: MeshTask) -> dict:
