@@ -43,14 +43,15 @@ pip install -r requirements.txt
 Create a `.env` file in the robert/ directory:
 
 ```
-ANTHROPIC_API_KEY=sk-...
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your-key
+# All credentials must be environment variables — never hardcode
+ANTHROPIC_API_KEY=[set from env]
+SUPABASE_URL=[set from env]
+SUPABASE_SERVICE_KEY= os.environ.get("SUPABASE_SERVICE_KEY", "")
 SENDGRID_API_KEY= os.environ.get("SENDGRID_API_KEY", "")
-TELEGRAM_BOT_TOKEN=your-bot-token
-TELEGRAM_CHAT_ID=your-chat-id
+TELEGRAM_BOT_TOKEN=[set from env]
+TELEGRAM_CHAT_ID=[set from env]
 WORKSPACE_PATH=/root/.openclaw/workspace
-ROBERT_MODEL=claude-haiku-4-5
+ROBERT_MODEL=anthropic/claude-haiku-4-5
 ```
 
 ## Usage

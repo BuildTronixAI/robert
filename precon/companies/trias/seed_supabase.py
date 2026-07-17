@@ -6,8 +6,13 @@ Run: python3 seed_supabase.py
 import json, os, time, sys
 import urllib.request, urllib.error
 
-SUPABASE_URL = "https://sspqyhaxzwaetfbydlie.supabase.co"
+# Credentials must be loaded from environment
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SERVICE_KEY  = os.environ.get("SUPABASE_SERVICE_KEY", "")
+if not SERVICE_KEY:
+    raise RuntimeError("SUPABASE_SERVICE_KEY environment variable not set")
+if not SUPABASE_URL:
+    raise RuntimeError("SUPABASE_URL environment variable not set")
 COMPANY_ID   = "trias-construction"
 BATCH_SIZE   = 500
 
