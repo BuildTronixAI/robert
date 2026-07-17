@@ -1,8 +1,9 @@
 """PRECON API — Proposal Generator routes"""
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Optional
 from precon.api.store import get_or_create_store
+from precon.api.auth import require_api_token
 
 router = APIRouter(prefix="/projects/{project_id}/proposal", tags=["proposal"])
 
@@ -157,17 +158,17 @@ def get_proposal(project_id: str):
 
 
 @router.post("/section/{section_id}", response_model=dict)
-def update_section(project_id: str, section_id: str, body: SectionUpdateRequest):
+def update_section(project_id: str, section_id: str, body: SectionUpdateRequest, _auth: None = Depends(require_api_token)):
     # In production: persist section content to DB
     return {"ok": True}
 
 
 @router.post("/override-gate", response_model=dict)
-def override_gate(project_id: str, body: GateOverrideRequest):
+def override_gate(project_id: str, body: GateOverrideRequest, _auth: None = Depends(require_api_token)):
     return {"ok": True, "override_reason": body.reason}
 
 
 @router.post("/generate-pdf", response_model=dict)
-def generate_pdf(project_id: str):
+def generate_pdf(project_id: str, _auth: None = Depends(require_api_token)):
     # In production: calls proposal_generator.py, returns PDF URL
     return {"ok": True, "pdf_url": f"/media/proposals/{project_id}-proposal.pdf", "status": "generating"}

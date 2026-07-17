@@ -1,5 +1,6 @@
 """PRECON API — Screen 3 routes"""
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from precon.api.auth import require_api_token
 from precon.api.models import (
     Screen3ItemOut, Screen3SaveRequest, Screen3SaveResponse, GateCheckOut,
 )
@@ -31,7 +32,7 @@ def get_screen3_items(project_id: str):
 
 
 @router.post("/{item_id}/save", response_model=Screen3SaveResponse)
-def save_screen3_item(project_id: str, item_id: str, body: Screen3SaveRequest):
+def save_screen3_item(project_id: str, item_id: str, body: Screen3SaveRequest, _auth: None = Depends(require_api_token)):
     store = get_or_create_store(project_id)
     total = store.save_screen3(
         item_id, body.cost_code, body.labor, body.material, body.equipment, body.notes
@@ -40,7 +41,7 @@ def save_screen3_item(project_id: str, item_id: str, body: Screen3SaveRequest):
 
 
 @router.post("/advance", response_model=GateCheckOut)
-def advance_screen3(project_id: str):
+def advance_screen3(project_id: str, _auth: None = Depends(require_api_token)):
     store = get_or_create_store(project_id)
     passed, error = store.advance_screen3()
     return GateCheckOut(passed=passed, blocking_reason=error)

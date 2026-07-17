@@ -145,11 +145,10 @@ class ProjectStore:
         self.review_state.updated_at = _now()
 
     def advance_screen1(self) -> tuple[bool, Optional[str]]:
-        pending = [i for i in self.screen1_items
-                   if i.decision in (ReviewDecision.AI_PENDING, ReviewDecision.DEFER,
-                                     ReviewDecision.IN_REVIEW)]
-        if pending:
-            return False, f"{len(pending)} item(s) still pending or deferred."
+        from precon.review_layer.gate_engine import ReviewLayerGateEngine
+        check = ReviewLayerGateEngine().check_screen_1_complete(self.screen1_items)
+        if not check.passed:
+            return False, check.blocking_reason or "Screen 1 gate blocked."
         self.review_state.screen_1 = ScreenState.COMPLETE
         self.review_state.screen_2 = ScreenState.IN_PROGRESS
         self._update_screen2_ceiling()
@@ -229,11 +228,12 @@ class ProjectStore:
         self.review_state.updated_at = _now()
 
     def advance_screen2(self) -> tuple[bool, Optional[str]]:
-        pending = [i for i in self.screen2_items if i.status == ReviewDecision.AI_PENDING]
-        if pending:
-            return False, f"{len(pending)} takeoff item(s) still pending."
-        if self.review_state.session_batch_approved_count > self.review_state.session_batch_ceiling:
-            return False, "Batch approval session ceiling exceeded."
+        from precon.review_layer.gate_engine import ReviewLayerGateEngine
+        check = ReviewLayerGateEngine().check_screen_2_complete(
+            self.screen2_items, self.review_state
+        )
+        if not check.passed:
+            return False, check.blocking_reason or "Screen 2 gate blocked."
         self.review_state.screen_2 = ScreenState.COMPLETE
         self.review_state.screen_2_5 = ScreenState.IN_PROGRESS
         self._update_screen25_counts()
@@ -289,14 +289,12 @@ class ProjectStore:
                 break
 
     def advance_screen25(self) -> tuple[bool, Optional[str]]:
-        blocking_pending = [i for i in self.screen25_tab_a
-                            if i.blocking and i.status == CoverageStatus.PENDING]
-        if blocking_pending:
-            return False, f"{len(blocking_pending)} blocking gap(s) unresolved."
-        cit_failed = [i for i in self.screen25_tab_b
-                      if i.status == CoverageStatus.CITATION_FAILED and not i.citation_override_by]
-        if cit_failed:
-            return False, f"{len(cit_failed)} citation failure(s) without override."
+        from precon.review_layer.gate_engine import ReviewLayerGateEngine
+        # Gate engine expects a single coverage list with tab markers
+        coverage_items = list(self.screen25_tab_a) + list(self.screen25_tab_b)
+        check = ReviewLayerGateEngine().check_screen_2_5_complete(coverage_items)
+        if not check.passed:
+            return False, check.blocking_reason or "Screen 2.5 gate blocked."
         self.review_state.screen_2_5 = ScreenState.COMPLETE
         self.review_state.screen_3 = ScreenState.IN_PROGRESS
         self._update_screen3_counts()
@@ -338,15 +336,10 @@ class ProjectStore:
         return 0.0
 
     def advance_screen3(self) -> tuple[bool, Optional[str]]:
-        unmapped = [i for i in self.screen3_items
-                    if i.ai_translation_method == "UNMAPPED" and not i.confirmed_cost_code]
-        semantic_pending = [i for i in self.screen3_items
-                            if i.ai_translation_method == "AI_SEMANTIC"
-                            and i.status == ReviewDecision.AI_PENDING]
-        if unmapped:
-            return False, f"{len(unmapped)} unmapped item(s) need cost codes."
-        if semantic_pending:
-            return False, f"{len(semantic_pending)} AI-semantic item(s) need review."
+        from precon.review_layer.gate_engine import ReviewLayerGateEngine
+        check = ReviewLayerGateEngine().check_screen_3_complete(self.screen3_items)
+        if not check.passed:
+            return False, check.blocking_reason or "Screen 3 gate blocked."
         self.review_state.screen_3 = ScreenState.COMPLETE
         self.review_state.updated_at = _now()
         return True, None
@@ -360,15 +353,26 @@ _stores: dict[str, ProjectStore] = {}
 def get_store(project_id: str) -> Optional[ProjectStore]:
     return _stores.get(project_id)
 
+def _dev_seed_enabled() -> bool:
+    import os
+    return os.environ.get("PRECON_DEV_SEED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def get_or_create_store(project_id: str, project_name: str = "",
                          building_type: str = "office", mode: str = "sub") -> ProjectStore:
     if project_id not in _stores:
         store = ProjectStore(project_id, project_name or project_id,
                              building_type, mode)
-        # Seed with mock data for dev
-        _seed_mock_data(store)
+        # Mock seed is DEV ONLY — never auto-seed in production
+        if _dev_seed_enabled():
+            _seed_mock_data(store)
         _stores[project_id] = store
     return _stores[project_id]
+
+
+def clear_stores() -> None:
+    """Test helper — wipe in-memory registry."""
+    _stores.clear()
 
 
 def _seed_mock_data(store: ProjectStore):
