@@ -5,6 +5,7 @@ Hardening:
 - Optional workspace cwd confinement
 - Credential scrubbing on stdout/stderr
 - Process-group kill on timeout
+- Optional embedded policy gate for state-changing callers
 """
 
 from __future__ import annotations
@@ -43,12 +44,16 @@ def run_command(
     cwd: Optional[str] = None,
     shell: Optional[bool] = None,
     env: Optional[dict] = None,
+    require_gate: bool = False,
+    gate_payload: Optional[dict] = None,
 ) -> Dict:
     """
     Execute a command and return stdout, stderr, and return code.
 
     Prefer passing an argv list. String commands with shell=True are allowed
     only for legacy callers; coder paths should use argv.
+
+    If require_gate=True, policy_gate.gate('run_script', ...) must succeed first.
     """
     if timeout is None:
         timeout = COMMAND_TIMEOUT
@@ -60,8 +65,20 @@ def run_command(
     except OSError:
         workdir = None
 
-    # Prevent runaway env inheritance of secrets into child when not needed —
-    # still inherit by default so python/path work; callers may pass env=.
+    if require_gate:
+        from policy_gate import gate
+        preview = cmd if isinstance(cmd, str) else " ".join(str(x) for x in cmd)
+        payload = dict(gate_payload or {})
+        payload.setdefault("cmd_preview", preview[:500])
+        payload.setdefault("cwd", workdir or "")
+        gate(
+            "run_script",
+            target="exec_tool",
+            resource_target=workdir or "",
+            reversible=True,
+            execution_payload=payload,
+        )
+
     child_env = env if env is not None else os.environ.copy()
 
     try:
@@ -81,8 +98,7 @@ def run_command(
             "returncode": result.returncode,
         }
     except subprocess.TimeoutExpired as e:
-        # Best-effort kill of the process group started via start_new_session.
-        if e.process is not None:
+        if getattr(e, "process", None) is not None:
             try:
                 os.killpg(e.process.pid, signal.SIGKILL)
             except Exception:
@@ -100,6 +116,20 @@ def run_command(
         }
 
 
-def run_argv(argv: List[str], timeout: Optional[int] = None, cwd: Optional[str] = None) -> Dict:
+def run_argv(
+    argv: List[str],
+    timeout: Optional[int] = None,
+    cwd: Optional[str] = None,
+    *,
+    require_gate: bool = False,
+    gate_payload: Optional[dict] = None,
+) -> Dict:
     """Execute an argv list with shell disabled."""
-    return run_command(argv, timeout=timeout, cwd=cwd, shell=False)
+    return run_command(
+        argv,
+        timeout=timeout,
+        cwd=cwd,
+        shell=False,
+        require_gate=require_gate,
+        gate_payload=gate_payload,
+    )

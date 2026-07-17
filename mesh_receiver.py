@@ -227,7 +227,17 @@ class MeshReceiver:
         self.robert_agent_id = robert_agent_id
         self._bob_public_key_hex = bob_public_key_hex
         self.witness_log = witness_log
-        self._nonce_store = nonce_store or NonceStore()
+        # Prefer durable SQLite nonce store (survives restart); fall back to memory.
+        if nonce_store is not None:
+            self._nonce_store = nonce_store
+        else:
+            try:
+                from robert_store import DurableNonceStore
+                self._nonce_store = DurableNonceStore(window_seconds=NONCE_WINDOW_SECONDS)
+                logger.info("D11 using durable SQLite nonce store")
+            except Exception as e:
+                logger.warning("D11 durable nonce store unavailable (%s) — in-memory fallback", e)
+                self._nonce_store = NonceStore()
         self._task_handlers: dict[str, callable] = {}
         
         # Parse public key
@@ -350,8 +360,16 @@ class MeshReceiver:
         self._verify_signature(task)
 
         # 4. Nonce (replay prevention) — claim only after authenticity proven
-        self._nonce_store.check_and_record(task.nonce)
-
+        # Durable store accepts (nonce, task_id); in-memory store accepts nonce only.
+        try:
+            self._nonce_store.check_and_record(task.nonce, task.task_id)  # type: ignore[call-arg]
+        except TypeError:
+            self._nonce_store.check_and_record(task.nonce)
+        except Exception as e:
+            # Normalize durable replay errors into MeshReplayError
+            if e.__class__.__name__ in ("DurableReplayError", "MeshReplayError"):
+                raise MeshReplayError(str(e)) from e
+            raise
     def _verify_signature(self, task: MeshTask) -> None:
         """
         Verify Ed25519 signature using BOB's PUBLIC key.

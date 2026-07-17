@@ -29,7 +29,16 @@ def _load_default_context() -> str:
             )
 
 
-def run_task(task: str, context: str = "", notify: bool = True, chat_id: str = "default") -> dict:
+def run_task(
+    task: str,
+    context: str = "",
+    notify: bool = True,
+    chat_id: str = "default",
+    *,
+    actor_user_id: str = "",
+    actor_role: str = "",
+    actor_jwt: str = "",
+) -> dict:
     """Run a task through Robert's graph."""
     if not task or not str(task).strip():
         return {
@@ -80,6 +89,11 @@ def run_task(task: str, context: str = "", notify: bool = True, chat_id: str = "
         test_results={},
         # Response mode (set by executor — clarification vs engineering)
         response_mode="engineering",
+        # Actor context from listener identity mint
+        actor_user_id=actor_user_id or "",
+        actor_role=actor_role or "",
+        actor_jwt=actor_jwt or "",
+        telegram_chat_id=str(chat_id),
     )
 
     # Persistent thread per Telegram chat — enables multi-turn memory

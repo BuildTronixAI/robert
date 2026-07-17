@@ -157,6 +157,18 @@ Robert is the Buildtronix COO engine inside TronixMesh. Stability-first rules:
 
 Precon (GC estimating product) lives in this repo but is **not** part of the Robert LangGraph COO loop — harden separately.
 
+## Completion roadmap
+
+| Phase | Status | Focus |
+|-------|--------|--------|
+| A — Runtime spine | Done | Listener durability, orchestrator, graph retries, mesh v2, exec/memory |
+| B — Governance | In progress | Stable policy decisions, approvals before idempotency, durable nonce/idempotency store, actor JWT in state |
+| C — Tool boundary | Next | Every mutating tool calls `gate()`; `safe_fetch` on all HTTP; user JWT for RLS reads |
+| D — Mesh Phase C | Later | Externally committed results, outbound BOB delegation, shared nonce table in Supabase |
+| E — Precon | Separate | Auth on API, wire ReviewLayerGateEngine, no mock auto-seed in prod |
+
+**Done when:** Gate 2 quorum enforced in prod, mesh nonces shared across hosts, no service-key bypass for user data paths, Precon not required for COO completeness.
+
 ## License
 
 Internal tool for Buildtronix.

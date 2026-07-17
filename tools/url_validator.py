@@ -25,8 +25,14 @@ from urllib.parse import urlparse
 ALLOWED_DOMAINS = {
     "api.weatherapi.com",
     "graph.microsoft.com",
+    "openrouter.ai",
+    "api.telegram.org",
+    "api.resend.com",
+    "api.sendgrid.com",
     # Add each domain explicitly. No wildcards.
     # Read the IP PINNING RULE above before adding any domain.
+    # Supabase project hosts are tenant-specific — callers should use
+    # safe_fetch(..., skip_allowlist=True) only after host ends with .supabase.co
 }
 
 PRIVATE_IP_RANGES = [

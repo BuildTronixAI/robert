@@ -9,7 +9,6 @@ Import in: policy_gate.py (add reject_if_human() call at gate entry)
 
 import time
 import logging
-from supabase import create_client
 import os
 
 _log = logging.getLogger(__name__)
@@ -74,6 +73,7 @@ def _refresh_human_node_cache() -> None:
     """Refresh node type cache from tronix_node_registry."""
     global NODE_TYPE_CACHE, _cache_loaded_at
     try:
+        from supabase import create_client
         client = create_client(SUPABASE_URL, SUPABASE_KEY)
         response = client.table("tronix_node_registry").select("node_id, node_type").eq("status", "active").execute()
         NODE_TYPE_CACHE = {row["node_id"]: row["node_type"] for row in response.data}

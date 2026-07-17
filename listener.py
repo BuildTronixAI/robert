@@ -356,7 +356,7 @@ def _handle_callback_query(callback: dict) -> None:
         log(f"[callback] handle_callback failed: {e}")
         alert_chris(f"Approval callback failed: {str(e)[:200]}")
 
-def process(text, from_name, chat_id="default"):
+def process(text, from_name, chat_id="default", actor=None):
     """Run task through Robert's graph."""
     # Kill switch — block all processing if BOB_DISABLED=true
     try:
@@ -371,8 +371,17 @@ def process(text, from_name, chat_id="default"):
         log(f"[process] Import error loading run_task: {import_err}")
         raise RuntimeError(f"run_task import failed: {import_err}")
 
+    actor = actor or {}
     context = memory_store.get_context_summary()
-    result = run_task(task=text, context=context, notify=False, chat_id=str(chat_id))
+    result = run_task(
+        task=text,
+        context=context,
+        notify=False,
+        chat_id=str(chat_id),
+        actor_user_id=str(actor.get("user_id", "")),
+        actor_role=str(actor.get("role", "")),
+        actor_jwt=str(actor.get("jwt", "")),
+    )
     
     output = result.get("result", "No output.")
     task_entry = {"task": text, "source": "telegram", "from": from_name}
@@ -612,7 +621,16 @@ def run():
 
                 log(f"Processing: {text[:60]}")
                 try:
-                    result = process(text, from_name, chat_id=chat_id)
+                    result = process(
+                        text,
+                        from_name,
+                        chat_id=chat_id,
+                        actor={
+                            "user_id": identity_profile.get("user_id", ""),
+                            "role": identity_profile.get("role", ""),
+                            "jwt": jwt_token or "",
+                        },
+                    )
                     # result may be a dict or string
                     # RR-0028: extract reviewer verdict flags BEFORE meaningful-output check
                     if isinstance(result, dict):
