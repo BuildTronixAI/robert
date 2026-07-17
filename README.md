@@ -164,7 +164,7 @@ Precon (GC estimating product) lives in this repo but is **not** part of the Rob
 | A — Runtime spine | Done | Listener durability, orchestrator, graph retries, mesh v2, exec/memory |
 | B — Governance | Done | Stable policy decisions, approvals before idempotency, durable nonce/idempotency store, actor JWT in state |
 | C — Tool boundary | Done | Mutating tools call `gate()`; HTTP via `safe_fetch`; RLS reads prefer actor JWT (`user_client`) |
-| D — Mesh Phase C | Next | Externally committed results, outbound BOB delegation, shared nonce table in Supabase |
+| D — Mesh Phase C | Done | `EXTERNALLY_COMMITTED` via HMAC result to `BOB_INBOX_URL`; shared `mesh_nonces` table |
 | E — Precon | Separate | Auth on API, wire ReviewLayerGateEngine, no mock auto-seed in prod |
 
 **Done when:** Gate 2 quorum enforced in prod, mesh nonces shared across hosts, no service-key bypass for user data paths, Precon not required for COO completeness.
@@ -173,6 +173,12 @@ Precon (GC estimating product) lives in this repo but is **not** part of the Rob
 - Set `SUPABASE_ANON_KEY` for correct `apikey` + user JWT `Authorization` (falls back to service key if unset).
 - `tools.actor_context` binds actor JWT for the duration of `run_task`.
 - Listener/notify Telegram sends may use `skip_gate=True` (already authorized upstream).
+
+### Phase D (Mesh Phase C) notes
+- Default remains Phase B (`ROBERT_MESH_PHASE=B`) — STAGED only.
+- Enable with `ROBERT_MESH_PHASE=C` (requires `BOB_INBOX_URL` + `BOB_SHARED_SECRET`).
+- Deploy `deploy/mesh_nonces.sql` before multi-host production.
+- External commit fails closed: delivery errors leave task **STAGED** (never falsely committed).
 
 ## License
 
