@@ -165,9 +165,15 @@ Precon (GC estimating product) lives in this repo but is **not** part of the Rob
 | B — Governance | Done | Stable policy decisions, approvals before idempotency, durable nonce/idempotency store, actor JWT in state |
 | C — Tool boundary | Done | Mutating tools call `gate()`; HTTP via `safe_fetch`; RLS reads prefer actor JWT (`user_client`) |
 | D — Mesh Phase C | Done | `EXTERNALLY_COMMITTED` via HMAC result to `BOB_INBOX_URL`; shared `mesh_nonces` table |
-| E — Precon | Separate | Auth on API, wire ReviewLayerGateEngine, no mock auto-seed in prod |
+| E — Precon | Done | Bearer auth on mutating API; ReviewLayerGateEngine advances; mock seed gated by `PRECON_DEV_SEED`; engine0 config re-export; gate audit strict mode |
 
 **Done when:** Gate 2 quorum enforced in prod, mesh nonces shared across hosts, no service-key bypass for user data paths, Precon not required for COO completeness.
+
+### Phase E (Precon) notes
+- Mutating routes require `Authorization: Bearer $PRECON_API_TOKEN` (fail-closed if unset).
+- Keep `PRECON_DEV_SEED=0` in production; set `1` only for local demo data.
+- `PRECON_AUTH_DISABLED=1` is local/test bypass only.
+- See `deploy/robert.env.example` for the full activation checklist (mesh + Precon).
 
 ### Phase C notes
 - Set `SUPABASE_ANON_KEY` for correct `apikey` + user JWT `Authorization` (falls back to service key if unset).

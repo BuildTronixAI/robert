@@ -1,5 +1,6 @@
 """PRECON API — Screen 1 routes"""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from precon.api.auth import require_api_token
 from precon.api.models import (
     Screen1ItemOut, ConflictDetailsOut, Screen1DecideRequest, Screen1DecideResponse,
     GateCheckOut, BidConfidenceOut, VectorScoreOut, ReviewDecision,
@@ -39,7 +40,12 @@ def get_screen1_items(project_id: str):
 
 
 @router.post("/{item_id}/decide", response_model=Screen1DecideResponse)
-def decide_screen1_item(project_id: str, item_id: str, body: Screen1DecideRequest):
+def decide_screen1_item(
+    project_id: str,
+    item_id: str,
+    body: Screen1DecideRequest,
+    _auth: None = Depends(require_api_token),
+):
     store = get_or_create_store(project_id)
     store.decide_screen1(item_id, body.decision, body.notes,
                           body.assume_price_confirmed, body.assume_text)
@@ -50,7 +56,7 @@ def decide_screen1_item(project_id: str, item_id: str, body: Screen1DecideReques
 
 
 @router.post("/advance", response_model=GateCheckOut)
-def advance_screen1(project_id: str):
+def advance_screen1(project_id: str, _auth: None = Depends(require_api_token)):
     store = get_or_create_store(project_id)
     passed, error = store.advance_screen1()
     return GateCheckOut(passed=passed, blocking_reason=error)

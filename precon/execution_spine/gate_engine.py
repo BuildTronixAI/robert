@@ -329,8 +329,13 @@ class GateEngine:
                     "evaluated_by":     "system",
                 }).execute()
             except Exception as e:
-                # Gate log failure is non-fatal but should alert
-                print(f"[GATE ENGINE WARNING] Failed to persist gate event: {e}")
+                import os
+                msg = f"[GATE ENGINE] Failed to persist gate event: {e}"
+                print(msg)
+                if os.environ.get("PRECON_GATE_AUDIT_STRICT", "").strip().lower() in (
+                    "1", "true", "yes", "on"
+                ):
+                    raise RuntimeError(msg) from e
 
     @property
     def decisions(self) -> list[GateDecision]:

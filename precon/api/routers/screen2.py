@@ -1,5 +1,6 @@
 """PRECON API — Screen 2 routes"""
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from precon.api.auth import require_api_token
 from precon.api.models import (
     Screen2ItemOut, QuantityReliabilityOut, Screen2CorrectRequest,
     Screen2BatchApproveRequest, Screen2BatchApproveResponse, GateCheckOut,
@@ -48,28 +49,37 @@ def get_screen2_items(project_id: str):
 
 
 @router.post("/{item_id}/approve", response_model=dict)
-def approve_item(project_id: str, item_id: str):
+def approve_item(project_id: str, item_id: str, _auth: None = Depends(require_api_token)):
     store = get_or_create_store(project_id)
     store.approve_screen2(item_id)
     return {"ok": True, "bid_confidence": _bid_confidence_out(store.compute_bid_confidence()).model_dump()}
 
 
 @router.post("/{item_id}/correct", response_model=dict)
-def correct_item(project_id: str, item_id: str, body: Screen2CorrectRequest):
+def correct_item(
+    project_id: str,
+    item_id: str,
+    body: Screen2CorrectRequest,
+    _auth: None = Depends(require_api_token),
+):
     store = get_or_create_store(project_id)
     store.correct_screen2(item_id, body.qty, body.notes, body.sheet)
     return {"ok": True, "bid_confidence": _bid_confidence_out(store.compute_bid_confidence()).model_dump()}
 
 
 @router.post("/batch-approve", response_model=Screen2BatchApproveResponse)
-def batch_approve(project_id: str, body: Screen2BatchApproveRequest):
+def batch_approve(
+    project_id: str,
+    body: Screen2BatchApproveRequest,
+    _auth: None = Depends(require_api_token),
+):
     store = get_or_create_store(project_id)
     approved, error = store.batch_approve_screen2(body.item_ids)
     return Screen2BatchApproveResponse(ok=error is None, approved=approved, blocked=error)
 
 
 @router.post("/advance", response_model=GateCheckOut)
-def advance_screen2(project_id: str):
+def advance_screen2(project_id: str, _auth: None = Depends(require_api_token)):
     store = get_or_create_store(project_id)
     passed, error = store.advance_screen2()
     return GateCheckOut(passed=passed, blocking_reason=error)
