@@ -5,7 +5,14 @@ After=network.target
 [Service]
 Type=simple
 User=root
+# Host paths may differ; preferred: WorkingDirectory=/var/lib/robert/workspace
 WorkingDirectory=/root/.openclaw/workspace/robert
+# Secrets — never commit the live file. Template: deploy/secrets.env.example
+EnvironmentFile=-/etc/robert/secrets.env
+# ROBERT_RESET_CHAT_HISTORY: leave UNSET. Only set =1 (one-shot,
+# stamp-guarded) or =force (override stamp) for an intentional
+# history wipe. Remove after the deploy restart. Never bake into
+# templates or config sync.
 ExecStart=/usr/bin/python3 /root/.openclaw/workspace/robert/listener.py
 Restart=always
 RestartSec=15
