@@ -168,39 +168,30 @@ def planner(state: RobertState) -> RobertState:
         is_finance = "is_finance_task: true" in plan_text.lower()
         is_coding = "is_coding_task: true" in plan_text.lower()
 
-        # Conversational detection — questions/discussion that don't need structured output
-        # These bypass the ## Task Output / ## Completion Report requirement
-        task_text = state["current_task"].strip()
-        _action_keywords = [
-            "build", "create", "write", "generate", "deploy", "fix", "debug",
-            "analyze", "calculate", "report", "spec", "draft", "design",
-            "run", "execute", "install", "migrate", "update", "delete"
-        ]
-        _is_question_or_discussion = (
-            task_text.endswith("?")
-            or task_text.lower().startswith(("what", "who", "how", "why", "when", "where",
-                                             "do you", "can you", "tell me", "define",
-                                             "describe", "explain", "are you", "is there"))
-        )
-        is_conversational = (
-            not is_coding
-            and not is_finance
-            and not any(kw in task_text.lower() for kw in _action_keywords)
-            and (len(task_text) < 80 or _is_question_or_discussion)
-            and "\n" not in task_text           # multi-line = structured task, not chat
-            and not task_text.startswith("{")    # JSON payload = mesh task
-        )
+        # FIX 4 — honor pre-classified CHAT (listener/main) before heuristics
+        from gateway_prompt import classify_inbound
+
+        pre_kind = (state.get("message_kind") or "").upper()
+        if pre_kind not in ("CHAT", "TASK"):
+            pre_kind = classify_inbound(state["current_task"])
+            state["message_kind"] = pre_kind
+
+        is_conversational = pre_kind == "CHAT" and not is_coding and not is_finance
 
         # RR-0029 follow-up: translate planner flags into task_type for reviewer.py
         # task_type drives the length limit — "code" tasks get 50K, "general" gets 12K
         if is_coding:
             task_type = "code"
+            state["message_kind"] = "TASK"
         elif is_finance:
             task_type = "finance"
+            state["message_kind"] = "TASK"
         elif is_conversational:
             task_type = "conversational"
+            state["message_kind"] = "CHAT"
         else:
             task_type = "general"
+            state["message_kind"] = "TASK"
 
         state["messages"].append({"role": "planner", "content": plan_text})
         state["is_finance_task"] = is_finance
