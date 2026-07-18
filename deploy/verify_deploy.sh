@@ -83,39 +83,38 @@ echo
 
 # ── (a) ANTHROPIC_API_KEY in running unit env (masked) ──────────────────────
 check_api_key() {
-  if ! systemctl is-active --quiet "$UNIT" 2>/dev/null; then
-    fail "systemd unit '$UNIT' is not active"
-    mask_set "ANTHROPIC_API_KEY" ""
-    return
+  local val="" or_val="" environ=""
+  if systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+    local pid
+    pid="$(systemctl show -p MainPID --value "$UNIT" 2>/dev/null || echo 0)"
+    if [[ -n "$pid" && "$pid" != "0" && -r "/proc/${pid}/environ" ]]; then
+      environ="/proc/${pid}/environ"
+      val="$(tr '\0' '\n' < "$environ" | awk -F= '$1=="ANTHROPIC_API_KEY"{print substr($0,index($0,"=")+1); exit}')"
+      or_val="$(tr '\0' '\n' < "$environ" | awk -F= '$1=="OPENROUTER_API_KEY"{print substr($0,index($0,"=")+1); exit}')"
+    else
+      fail "ANTHROPIC_API_KEY: unit active but MainPID/environ unreadable (need root?)"
+      mask_set "ANTHROPIC_API_KEY" ""
+      return
+    fi
+  else
+    # --phase pre must abort if we cannot prove the key will be loaded
+    local envf="${ROBERT_SECRETS_ENV:-/etc/robert/secrets.env}"
+    if [[ -r "$envf" ]]; then
+      warn "unit '$UNIT' not active — checking $envf (masked) for pre-flight"
+      val="$(awk -F= '$1=="ANTHROPIC_API_KEY"{print substr($0,index($0,"=")+1); exit}' "$envf" | tr -d '\r')"
+      or_val="$(awk -F= '$1=="OPENROUTER_API_KEY"{print substr($0,index($0,"=")+1); exit}' "$envf" | tr -d '\r')"
+    else
+      fail "systemd unit '$UNIT' is not active and $envf unreadable — abort before restart"
+      mask_set "ANTHROPIC_API_KEY" ""
+      return
+    fi
   fi
-  local pid
-  pid="$(systemctl show -p MainPID --value "$UNIT" 2>/dev/null || echo 0)"
-  if [[ -z "$pid" || "$pid" == "0" ]]; then
-    fail "ANTHROPIC_API_KEY: could not resolve MainPID for $UNIT"
-    return
-  fi
-  local environ="/proc/${pid}/environ"
-  if [[ ! -r "$environ" ]]; then
-    fail "ANTHROPIC_API_KEY: cannot read $environ (need root?)"
-    return
-  fi
-  local val=""
-  val="$(tr '\0' '\n' < "$environ" | awk -F= '$1=="ANTHROPIC_API_KEY"{print substr($0,index($0,"=")+1); exit}')"
   mask_set "ANTHROPIC_API_KEY" "$val"
   if [[ -n "$val" ]]; then
-    pass "ANTHROPIC_API_KEY present in running unit env (masked)"
+    pass "ANTHROPIC_API_KEY present (masked) — safe to proceed"
   else
-    # Fallback: some hosts only set OPENROUTER and map Anthropic via proxy
-    local or_val=""
-    or_val="$(tr '\0' '\n' < "$environ" | awk -F= '$1=="OPENROUTER_API_KEY"{print substr($0,index($0,"=")+1); exit}')"
     mask_set "OPENROUTER_API_KEY" "$or_val"
-    if [[ -n "$or_val" ]]; then
-      warn "ANTHROPIC_API_KEY missing; OPENROUTER_API_KEY is set (may be intentional)"
-      # Still fail hard — work order says confirm ANTHROPIC_API_KEY before restart
-      fail "ANTHROPIC_API_KEY missing from running unit env"
-    else
-      fail "ANTHROPIC_API_KEY missing from running unit env"
-    fi
+    fail "ANTHROPIC_API_KEY=***MISSING*** — ABORT restart (auth trap)"
   fi
 }
 
