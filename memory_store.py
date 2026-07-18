@@ -33,7 +33,11 @@ DEFAULT_MEMORY = {
     "last_updated": None,
     "session_count": 0,
     "telegram_offset": 0,       # Last Telegram update ID processed
+    "conversation_history": {}, # chat_id -> [{role, content, ts}] last N turns
 }
+
+# Max turns retained per Telegram chat (Fix 5 — 6–10 window)
+_MAX_CHAT_TURNS = 10
 
 
 @contextmanager
@@ -201,4 +205,47 @@ def increment_session():
     with _memory_lock():
         mem = _load_unlocked()
         mem["session_count"] += 1
+        _save_unlocked(mem)
+
+
+def append_conversation_turn(chat_id: str, role: str, content: str) -> None:
+    """Append a Telegram turn for multi-turn context (Fix 5). Skips empty / identity-break."""
+    from gateway_prompt import looks_like_identity_break
+
+    text = (content or "").strip()
+    if not text or looks_like_identity_break(text):
+        return
+    key = str(chat_id or "default")
+    with _memory_lock():
+        mem = _load_unlocked()
+        hist = mem.setdefault("conversation_history", {})
+        turns = list(hist.get(key) or [])
+        turns.append({
+            "role": role,
+            "content": text[:2000],
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        })
+        hist[key] = turns[-_MAX_CHAT_TURNS:]
+        mem["conversation_history"] = hist
+        _save_unlocked(mem)
+
+
+def get_conversation_history(chat_id: str, max_turns: int = 8) -> list:
+    """Return recent turns for a chat (caller filters identity-break again at format time)."""
+    mem = load()
+    hist = mem.get("conversation_history") or {}
+    turns = list(hist.get(str(chat_id or "default")) or [])
+    return turns[-max_turns:]
+
+
+def clear_conversation_history(chat_id: str | None = None) -> None:
+    """Reset conversation replay after persona deploy (Fix 5). chat_id=None clears all."""
+    with _memory_lock():
+        mem = _load_unlocked()
+        if chat_id is None:
+            mem["conversation_history"] = {}
+        else:
+            hist = mem.setdefault("conversation_history", {})
+            hist.pop(str(chat_id), None)
+            mem["conversation_history"] = hist
         _save_unlocked(mem)

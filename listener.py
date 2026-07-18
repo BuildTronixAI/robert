@@ -364,6 +364,31 @@ def _handle_callback_query(callback: dict) -> None:
         log(f"[callback] handle_callback failed: {e}")
         alert_chris(f"Approval callback failed: {str(e)[:200]}")
 
+def _log_validation_failure(detail: str, text: str, result: dict | None = None) -> None:
+    """Write full validator/review failure detail to service log + DLQ; never to Telegram."""
+    log(f"[validator_failure] {detail}")
+    try:
+        from dlq import enqueue
+        enqueue(
+            agent="robert",
+            operation="telegram_validation_failure",
+            payload={
+                "inbound": (text or "")[:500],
+                "detail": detail[:2000],
+                "escalate_reason": (result or {}).get("escalate_reason", ""),
+                "revision_notes": (result or {}).get("revision_notes", ""),
+                "error": (result or {}).get("error", ""),
+                "task_type": (result or {}).get("task_type", ""),
+                "message_kind": (result or {}).get("message_kind", ""),
+            },
+            task_id=(result or {}).get("task_id") or None,
+            error_message=detail[:500],
+            error_type="validation_failure",
+        )
+    except Exception as dlq_err:
+        log(f"[validator_failure] DLQ enqueue failed: {dlq_err}")
+
+
 def process(text, from_name, chat_id="default", actor=None):
     """Run task through Robert's graph."""
     # Kill switch — block all processing if BOB_DISABLED=true
@@ -375,11 +400,21 @@ def process(text, from_name, chat_id="default", actor=None):
 
     try:
         from main import run_task
+        from gateway_prompt import classify_inbound
     except Exception as import_err:
         log(f"[process] Import error loading run_task: {import_err}")
         raise RuntimeError(f"run_task import failed: {import_err}")
 
     actor = actor or {}
+    kind = classify_inbound(text)
+    log(f"[gateway] message_kind={kind} text={text[:60]!r}")
+
+    # FIX 5 — record user turn before invoke (identity-break filtered in store)
+    try:
+        memory_store.append_conversation_turn(str(chat_id), "user", text)
+    except Exception as hist_err:
+        log(f"[gateway] append user turn failed: {hist_err}")
+
     context = memory_store.get_context_summary()
     result = run_task(
         task=text,
@@ -390,12 +425,18 @@ def process(text, from_name, chat_id="default", actor=None):
         actor_role=str(actor.get("role", "")),
         actor_jwt=str(actor.get("jwt", "")),
     )
-    
+
     output = result.get("result", "No output.")
-    task_entry = {"task": text, "source": "telegram", "from": from_name}
+    task_entry = {"task": text, "source": "telegram", "from": from_name, "message_kind": kind}
     memory_store.complete_task(task_entry, output)
     memory_store.increment_session()
-    
+
+    # FIX 5 — record assistant turn (skip identity-break / validator leak phrases)
+    try:
+        memory_store.append_conversation_turn(str(chat_id), "assistant", output)
+    except Exception as hist_err:
+        log(f"[gateway] append assistant turn failed: {hist_err}")
+
     return result
 
 def run():
@@ -424,6 +465,47 @@ def run():
     # Load last offset
     offset = memory_store.get_telegram_offset()
     log(f"Starting from offset {offset}")
+
+    # FIX 5 — one-shot reset of contaminated chat history after persona deploy.
+    # Consumed via stamp file so leaving the env var set does NOT wipe history
+    # on every future restart. Unset the env var when convenient; stamp auto-arms
+    # again only after the flag is removed (or set ROBERT_RESET_CHAT_HISTORY=force).
+    from pathlib import Path
+    _reset_flag = _d11_os.environ.get("ROBERT_RESET_CHAT_HISTORY", "").strip().lower()
+    _reset_stamp = Path(
+        _d11_os.environ.get(
+            "ROBERT_CHAT_HISTORY_RESET_STAMP",
+            "/var/lib/robert/workspace/.chat_history_reset_done",
+        )
+    )
+    if _reset_flag in ("0", "false", "no", "off", ""):
+        if _reset_stamp.exists():
+            try:
+                _reset_stamp.unlink()
+                log("[gateway] Reset stamp cleared — next ROBERT_RESET_CHAT_HISTORY=1 will fire once")
+            except OSError as unlink_err:
+                log(f"[gateway] Could not clear reset stamp: {unlink_err}")
+    elif _reset_flag in ("1", "true", "yes", "on", "force"):
+        try:
+            if _reset_flag == "force" or not _reset_stamp.exists():
+                memory_store.clear_conversation_history()
+                _reset_stamp.parent.mkdir(parents=True, exist_ok=True)
+                _reset_stamp.write_text(
+                    datetime.datetime.now(datetime.timezone.utc).isoformat() + "\n",
+                    encoding="utf-8",
+                )
+                log(
+                    "[gateway] Cleared conversation_history once "
+                    f"(ROBERT_RESET_CHAT_HISTORY={_reset_flag}; stamp={_reset_stamp})"
+                )
+            else:
+                log(
+                    "[gateway] ROBERT_RESET_CHAT_HISTORY still set but already consumed — "
+                    "history NOT cleared. Remove the env var from systemd "
+                    "(or set ROBERT_RESET_CHAT_HISTORY=force to clear again)."
+                )
+        except Exception as clear_err:
+            log(f"[gateway] clear_conversation_history failed: {clear_err}")
 
     # Announce once per hour max — persistent across restarts and reboots
     from pathlib import Path
@@ -641,19 +723,35 @@ def run():
                     )
                     # result may be a dict or string
                     # RR-0028: extract reviewer verdict flags BEFORE meaningful-output check
+                    # FIX 4 — never send raw validator / escalate_reason strings to Telegram
+                    from gateway_prompt import USER_SAFE_VALIDATION_FAILURE
                     if isinstance(result, dict):
                         raw_output = result.get("result") or result.get("output") or ""
                         reviewer_flagged_failure = (
                             result.get("requires_escalation", False)
                             or result.get("needs_revision", False)
                         )
-                        # If escalated/failed and output is bare/empty, surface the actual reason
-                        if reviewer_flagged_failure and (not raw_output or len(raw_output.strip()) < 20):
-                            escalate_reason = result.get("escalate_reason", "")
-                            revision_notes = result.get("revision_notes", "")
-                            error = result.get("error", "")
-                            reason = escalate_reason or revision_notes or error or "Task could not be completed after review."
-                            output = f"I wasn't able to complete that task. Reason: {reason[:300]}"
+                        if reviewer_flagged_failure:
+                            detail = (
+                                result.get("escalate_reason")
+                                or result.get("revision_notes")
+                                or result.get("error")
+                                or "reviewer_flagged_failure"
+                            )
+                            _log_validation_failure(str(detail), text, result)
+                            # Prefer a real deliverable if present; never leak pre-check strings
+                            leak_markers = (
+                                "Missing required section",
+                                "Pre-check failures",
+                                "Evidence 1",
+                                "reviewer_malfunction",
+                            )
+                            if raw_output and len(raw_output.strip()) >= 20 and not any(
+                                m in raw_output for m in leak_markers
+                            ):
+                                output = raw_output
+                            else:
+                                output = USER_SAFE_VALIDATION_FAILURE
                         else:
                             output = raw_output if raw_output else "I processed that but had nothing to return."
                     else:
@@ -705,8 +803,10 @@ def run():
                     memory_store.set_telegram_offset(next_offset)
                 except Exception as e:
                     log(f"Process error: {e}")
-                    err_text = f"Error processing task: {str(e)[:200]}"
+                    from gateway_prompt import USER_SAFE_VALIDATION_FAILURE
+                    _log_validation_failure(f"process_exception: {e}", text, None)
                     alert_chris(f"Task execution failed: {str(e)[:200]}")
+                    err_text = USER_SAFE_VALIDATION_FAILURE
                     if pending_msg_id:
                         api_call(ROBERT_BOT_TOKEN, "editMessageText", {
                             "chat_id": reply_chat_id,

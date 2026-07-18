@@ -53,6 +53,18 @@ def run_task(
     if not context:
         context = _load_default_context()
 
+    # FIX 4 — classify before graph so CHAT skips structured validator path
+    from gateway_prompt import classify_inbound
+    message_kind = classify_inbound(task)
+
+    # FIX 5 — last N Telegram turns for this chat (identity-break filtered at format time)
+    conversation_history: list = []
+    try:
+        import memory_store as _mem
+        conversation_history = _mem.get_conversation_history(str(chat_id), max_turns=8)
+    except Exception as hist_err:
+        print(f"[main] conversation history unavailable: {hist_err}", flush=True)
+
     # Bind actor JWT/role for RLS-scoped tools for the duration of this invoke.
     from tools.actor_context import set_actor, reset_actor
     _actor_token = set_actor(
@@ -67,7 +79,7 @@ def run_task(
         current_task=task,
         task="",              # set by planner (alias for current_task)
         task_id="",           # set by planner
-        task_type="general",  # set by planner
+        task_type="conversational" if message_kind == "CHAT" else "general",
         memory_context=context,
         # Routing
         is_finance_task=False,
@@ -103,6 +115,8 @@ def run_task(
         actor_role=actor_role or "",
         actor_jwt=actor_jwt or "",
         telegram_chat_id=str(chat_id),
+        message_kind=message_kind,
+        conversation_history=conversation_history,
     )
 
     # Persistent thread per Telegram chat — enables multi-turn memory

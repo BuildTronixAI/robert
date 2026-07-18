@@ -130,3 +130,11 @@ class RobertState(TypedDict):
 
     telegram_chat_id: str
     """Origin Telegram chat id for this run."""
+
+    # ── Gateway / Telegram conversation (Fixes 4–5) ───────────────────────────
+
+    message_kind: str
+    """Inbound classifier: 'CHAT' or 'TASK'. Set by main/listener; refined by planner."""
+
+    conversation_history: List[dict]
+    """Prior Telegram turns for this chat: [{'role': 'user'|'assistant', 'content': str}]."""
