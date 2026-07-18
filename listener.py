@@ -466,11 +466,44 @@ def run():
     offset = memory_store.get_telegram_offset()
     log(f"Starting from offset {offset}")
 
-    # FIX 5 — optional one-shot reset of contaminated chat history after persona deploy
-    if _d11_os.environ.get("ROBERT_RESET_CHAT_HISTORY", "").strip().lower() in ("1", "true", "yes", "on"):
+    # FIX 5 — one-shot reset of contaminated chat history after persona deploy.
+    # Consumed via stamp file so leaving the env var set does NOT wipe history
+    # on every future restart. Unset the env var when convenient; stamp auto-arms
+    # again only after the flag is removed (or set ROBERT_RESET_CHAT_HISTORY=force).
+    from pathlib import Path
+    _reset_flag = _d11_os.environ.get("ROBERT_RESET_CHAT_HISTORY", "").strip().lower()
+    _reset_stamp = Path(
+        _d11_os.environ.get(
+            "ROBERT_CHAT_HISTORY_RESET_STAMP",
+            "/var/lib/robert/workspace/.chat_history_reset_done",
+        )
+    )
+    if _reset_flag in ("0", "false", "no", "off", ""):
+        if _reset_stamp.exists():
+            try:
+                _reset_stamp.unlink()
+                log("[gateway] Reset stamp cleared — next ROBERT_RESET_CHAT_HISTORY=1 will fire once")
+            except OSError as unlink_err:
+                log(f"[gateway] Could not clear reset stamp: {unlink_err}")
+    elif _reset_flag in ("1", "true", "yes", "on", "force"):
         try:
-            memory_store.clear_conversation_history()
-            log("[gateway] Cleared conversation_history (ROBERT_RESET_CHAT_HISTORY=1)")
+            if _reset_flag == "force" or not _reset_stamp.exists():
+                memory_store.clear_conversation_history()
+                _reset_stamp.parent.mkdir(parents=True, exist_ok=True)
+                _reset_stamp.write_text(
+                    datetime.datetime.now(datetime.timezone.utc).isoformat() + "\n",
+                    encoding="utf-8",
+                )
+                log(
+                    "[gateway] Cleared conversation_history once "
+                    f"(ROBERT_RESET_CHAT_HISTORY={_reset_flag}; stamp={_reset_stamp})"
+                )
+            else:
+                log(
+                    "[gateway] ROBERT_RESET_CHAT_HISTORY still set but already consumed — "
+                    "history NOT cleared. Remove the env var from systemd "
+                    "(or set ROBERT_RESET_CHAT_HISTORY=force to clear again)."
+                )
         except Exception as clear_err:
             log(f"[gateway] clear_conversation_history failed: {clear_err}")
 
