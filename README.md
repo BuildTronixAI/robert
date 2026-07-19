@@ -186,6 +186,11 @@ Precon (GC estimating product) lives in this repo but is **not** part of the Rob
 - Deploy `deploy/mesh_nonces.sql` before multi-host production.
 - External commit fails closed: delivery errors leave task **STAGED** (never falsely committed).
 
+## Production robustness (v1.x)
+
+Canonical plan (locked): **[ROBERT-ROBUSTNESS-PLAN.md](ROBERT-ROBUSTNESS-PLAN.md)** — R0 deploy gate through R7 COO capabilities, with ADRs under `docs/adr/`.  
+Question: *under what conditions can Robert be trusted?* Execute phases with DoD + production evidence; do not expand the plan further without a new ADR.
+
 ## License
 
 Internal tool for Buildtronix.
