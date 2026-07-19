@@ -1,7 +1,18 @@
 # Robert Robustness Plan (v1.x)
 
-**Status:** Locked — planning frozen; execute with evidence.  
-**Scope:** Canonical roadmap for **Robert v1.x under the current architecture assumptions** (not universal).
+Living engineering record — not a static specification. Update the header and
+append a phase-closure entry when each R-phase closes with evidence.
+
+| Field | Value |
+|-------|--------|
+| **Status** | ACTIVE — planning frozen; executing R0 |
+| **Current Phase** | R0 — Deployment validation (**not complete** until evidence package exists) |
+| **Last Verified** | — |
+| **Evidence Package** | `deploy/evidence/R0/` (see template) |
+| **Architecture Version** | v1.x (assumptions below) |
+| **Last Successful R0** | — (open) |
+
+**Scope:** Roadmap for **Robert v1.x under the current architecture assumptions** — not universal. Do not call the roadmap “complete” until the first R0 evidence package exists; that deployment validates the process.
 
 ### Architecture assumptions (v1.x)
 
@@ -79,8 +90,9 @@ Default for Robert v1.x: Builder = Cursor/agent or eng implementer; Reviewer = p
 | **R6** | Distributed runtime | Locks, leader election, split-brain, clock skew |
 | **R6.5** | Upgrade / rollback | N→N+1, rollback, schema compat, version skew |
 | **R7** | Construction COO capabilities | RFI/CO/vendor/schedule/financials + ROI |
+| **R8** | Production operations | Sustain: capacity, cost, keys, patches, DR cadence, SLO review |
 
-**Platform:** R0–R6.5 · **Product/ROI:** R7
+**Platform:** R0–R6.5 · **Product/ROI:** R7 · **Sustain:** R8
 
 ### Coordination assumption (statement of record)
 
@@ -133,6 +145,17 @@ Exit: p99 &lt;5s under load; 0 duplicate executions; queue don’t drop; recover
 | R6 | Distributed systems tests | Leader election verified | Multi-host operations |
 | R6.5 | Upgrade validation | Rollback success logs | Zero-downtime deployment |
 | R7 | Construction domain review | End-to-end workflow tests | COO feature operations |
+| R8 | Ops cadence checklist | Quarterly DR + SLO review logs | Capacity / cost / patch calendar |
+
+---
+
+## Phase closure log
+
+Append one row (and a linked evidence dir) when a phase closes. Empty until R0 succeeds.
+
+| Phase | Date | Commit | Gate report | Reviewer | Operator | Approver | Evidence |
+|-------|------|--------|-------------|----------|----------|----------|----------|
+| — | — | — | — | — | — | — | — |
 
 ---
 
@@ -150,37 +173,71 @@ Exit: p99 &lt;5s under load; 0 duplicate executions; queue don’t drop; recover
 
 ## R0 — Immediate execution (hard gate)
 
-**Do not start R1 until R0 is closed with production evidence.**
+**Do not start R1 until R0 is closed with production evidence.**  
+**Do not mark this roadmap “complete” until the first R0 evidence package exists.**
+
+### R0 success criteria (all required)
+
+**Deployment**
+- [ ] Robert starts cleanly after a **cold** restart  
+- [ ] No manual intervention beyond documented steps  
+- [ ] `verify_deploy` passes  
+
+**Runtime**
+- [ ] Running process environment matches the documented secrets source  
+- [ ] **Wrapper is the only configuration source** (no shadow `/etc` vs `.env` drift — or secrets.env is what the wrapper sources exclusively)  
+- [ ] No duplicate / shadow environment variables  
+- [ ] Workspace path resolves exactly as documented  
+
+**Functional**
+- [ ] T1–T6 all pass from a **fresh** Telegram thread  
+- [ ] No regressions  
+- [ ] Evidence captured for every test  
+
+**Operational**
+- [ ] Startup time recorded  
+- [ ] Service restart procedure documented (runbook)  
+- [ ] Rollback procedure verified  
+- [ ] Gate report signed (Approver)  
+
+Only then: **R0 = COMPLETE** (update header + phase closure log).
 
 ### Operator checklist (host)
 
 ```bash
-# 1) Secrets — filesystem
+# 0) Pull tip including this plan
+cd /var/lib/robert/workspace && sudo git pull origin main
+
+# 1) Secrets — single source (wrapper must source ONE file; prefer /etc/robert/secrets.env)
 sudo grep -E '^(ANTHROPIC_API_KEY|OPENROUTER_API_KEY|SUPABASE_SERVICE_KEY|SUPABASE_URL)=' \
   /etc/robert/secrets.env | sed 's/=.*/=***SET***/'
 # Ensure SUPABASE_SERVICE_KEY (not SUPABASE_KEY). Ensure ANTHROPIC_API_KEY is set.
+# If run_robert.sh sources workspace .env, make it source secrets.env only — no dual copies.
 
-# 2) Restart
-sudo systemctl restart robert
+# 2) Cold restart + timing
+sudo systemctl stop robert
+sleep 2
+START_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+sudo systemctl start robert
 sudo systemctl is-active robert
+echo "startup_attempt_utc=$START_TS"
 
-# 3) Running process env (not just the file) — closes config drift
+# 3) Running process env (mandatory — closes config drift)
 PID=$(systemctl show -p MainPID --value robert)
 sudo tr '\0' '\n' < /proc/$PID/environ \
-  | grep -E '^(ANTHROPIC_API_KEY|SUPABASE_SERVICE_KEY|SUPABASE_URL)=' \
+  | grep -E '^(ANTHROPIC_API_KEY|SUPABASE_SERVICE_KEY|SUPABASE_URL|WORKSPACE_PATH)=' \
   | sed 's/=.*/=***SET***/'
+# WORKSPACE_PATH / cwd must match documented path
 
 # 4) Deploy verify
-cd /var/lib/robert/workspace   # or actual checkout
-sudo git pull origin main
 sudo bash deploy/ensure_reset_guard_comment.sh /etc/robert/secrets.env
 sudo bash deploy/verify_deploy.sh --phase pre
-# If history reset still needed for this deploy cycle:
-#   set ROBERT_RESET_CHAT_HISTORY=1 → restart → --phase post-reset
+# History reset cycle if still required for this deploy:
+#   ROBERT_RESET_CHAT_HISTORY=1 → restart → --phase post-reset
 #   remove flag → restart → --phase final
-# Else if already reset previously: --phase final after one healthy completion
+# Else after one healthy completion: --phase final
 
-# 5) Live T1–T6 in a FRESH Telegram thread
+# 5) Live T1–T6 — FRESH Telegram thread only
 # T1 Robert, status report
 # T2 What is today's date
 # T3 Check again
@@ -188,7 +245,8 @@ sudo bash deploy/verify_deploy.sh --phase pre
 # T5 Tell me a one-sentence joke
 # T6 one real executable task
 
-# 6) Gate report → Approver closes R0 only with verbatim replies + verify_deploy PASS
+# 6) Fill evidence package + gate report (see deploy/evidence/R0/README.md)
+# 7) Approver signs → update plan header Current Phase / Last Successful R0
 ```
 
 ### R0 grading (strict)
@@ -202,14 +260,26 @@ sudo bash deploy/verify_deploy.sh --phase pre
 | T5 | Plain chat; no validator error; no `##` sections |
 | T6 | Full `## Task Output` + `## Completion Report`; validator pass |
 
-On any FAIL: diagnosis only (which fix 1–5 / which R-item); no second deploy cycle without Approver OK.
+On any FAIL: diagnosis only; no second deploy cycle without Approver OK. Do not bypass gates because a fix “looks obvious.”
 
 ### R0 artifacts
 
-- `deploy/verify_deploy` PASS summary (pre / post-reset / final as applicable)  
-- Verbatim T1–T6 replies  
-- Gate report (Approver sign-off)  
-- Runbook: [deploy/runbooks/robert-startup-restart.md](deploy/runbooks/robert-startup-restart.md)
+- Evidence dir: [deploy/evidence/R0/](deploy/evidence/R0/)  
+- Runbook: [deploy/runbooks/robert-startup-restart.md](deploy/runbooks/robert-startup-restart.md)  
+- Gate report (signed)  
+
+---
+
+## R8 — Production operations (after R7)
+
+Not features — sustaining the system:
+
+- Capacity planning · cost monitoring · key rotation  
+- Dependency upgrades · security patch cadence  
+- Backup verification · quarterly DR exercises  
+- SLO review · operational dashboards  
+
+DoD: ops cadence checklist + quarterly DR/SLO evidence + calendar owned.
 
 ---
 
