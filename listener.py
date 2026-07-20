@@ -14,6 +14,8 @@ import logging
 import logging.handlers
 import urllib.request
 import urllib.error
+import fcntl
+import atexit
 
 # ── D11 Inbound Mesh Receiver ────────────────────────────────────────────────
 # Receives Ed25519-signed tasks from BOB only.
@@ -36,6 +38,49 @@ try:
 except Exception as _d11_e:
     print(f"[D11] Mesh receiver init failed: {_d11_e} — mesh tasks will be dropped")
     _mesh_receiver = None
+
+# Exclusive lock so only one getUpdates poller can run (prevents Telegram HTTP 409).
+_LISTENER_LOCK_FD = None
+
+
+def _listener_lock_path() -> str:
+    workspace = _d11_os.environ.get(
+        "WORKSPACE_PATH",
+        _d11_os.path.dirname(_d11_os.path.abspath(__file__)),
+    )
+    return _d11_os.path.join(workspace, "robert_listener.lock")
+
+
+def acquire_listener_lock() -> None:
+    """Non-blocking exclusive flock — second instance fails loud instead of 409-thrashing."""
+    global _LISTENER_LOCK_FD
+    path = _listener_lock_path()
+    _d11_os.makedirs(_d11_os.path.dirname(path) or ".", exist_ok=True)
+    fd = _d11_os.open(path, _d11_os.O_CREAT | _d11_os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        _d11_os.close(fd)
+        raise RuntimeError(
+            f"Another Robert listener holds {path} — refuse dual getUpdates "
+            "(Telegram HTTP 409). Stop the other process (systemd or manual) first."
+        )
+    _d11_os.write(fd, f"{_d11_os.getpid()}\n".encode())
+    _d11_os.fsync(fd)
+    _LISTENER_LOCK_FD = fd
+
+    def _release():
+        global _LISTENER_LOCK_FD
+        if _LISTENER_LOCK_FD is not None:
+            try:
+                fcntl.flock(_LISTENER_LOCK_FD, fcntl.LOCK_UN)
+                _d11_os.close(_LISTENER_LOCK_FD)
+            except OSError:
+                pass
+            _LISTENER_LOCK_FD = None
+
+    atexit.register(_release)
+
 
 def _is_mesh_task(text: str) -> bool:
     """Check if text is a signed mesh task envelope."""
@@ -447,7 +492,19 @@ def run():
     cleanup_checkpoints()
     log("Starting Phase 3 listener")
 
-    # Constitutional startup preconditions (git dirty + audit RPC)
+    # Single poller — fail before getUpdates if another instance is alive
+    acquire_listener_lock()
+    log(f"[startup] Listener lock acquired: {_listener_lock_path()}")
+
+    # Hard require JWT secret — do not announce "online" then drop every message
+    if not _d11_os.environ.get("SUPABASE_JWT_SECRET", "").strip():
+        raise RuntimeError(
+            "SUPABASE_JWT_SECRET missing from process environment. "
+            "Add it to the secrets file sourced by run_robert.sh / EnvironmentFile, "
+            "restart, and verify with: tr '\\0' '\\n' < /proc/$PID/environ | grep SUPABASE_JWT_SECRET"
+        )
+
+    # Constitutional startup preconditions (git dirty + audit RPC + JWT flag)
     STARTUP_STATE = check_startup_preconditions()
     log(STARTUP_STATE.as_summary())
     if STARTUP_STATE.degraded:
@@ -661,6 +718,14 @@ def run():
                 except JWTMintError as e:
                     log(f"[auth] JWT mint failed: {e}")
                     alert_chris(f"JWT mint error — SUPABASE_JWT_SECRET missing or invalid. Message dropped.")
+                    # User-facing notice — do not silent-drop (ops visibility in-thread)
+                    api_call(ROBERT_BOT_TOKEN, "sendMessage", {
+                        "chat_id": reply_chat_id,
+                        "text": (
+                            "Identity auth is unavailable right now "
+                            "(JWT secret missing or invalid). Ops has been alerted."
+                        ),
+                    })
                     memory_store.set_telegram_offset(next_offset)
                     continue
                 except Exception as e:
