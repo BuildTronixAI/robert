@@ -71,10 +71,47 @@ class StartupState:
         return "\n".join(lines)
 
 
+# Runtime artifacts that must not flip DEGRADED MODE (also listed in .gitignore).
+_RUNTIME_NOISE_NAMES = frozenset({
+    "robert_memory.json.lock",
+    "robert_listener.lock",
+    ".chat_history_reset_done",
+    ".git/index.lock",
+})
+
+
+def _porcelain_path(line: str) -> str:
+    """Extract path from a git status --porcelain line."""
+    raw = (line or "").rstrip()
+    if not raw:
+        return ""
+    # Rename: "R  old -> new"
+    if " -> " in raw:
+        raw = raw.split(" -> ", 1)[1]
+    # Standard: "XY path" (status is first two columns)
+    if len(raw) >= 4 and raw[2] == " ":
+        return raw[3:].strip()
+    parts = raw.split(maxsplit=1)
+    return parts[-1].strip() if parts else raw
+
+
+def _is_runtime_noise(path: str) -> bool:
+    """True if dirty path is a known runtime lock/stamp, not unverifiable code."""
+    if not path:
+        return True
+    base = os.path.basename(path.rstrip("/"))
+    if base in _RUNTIME_NOISE_NAMES:
+        return True
+    if base.endswith(".lock"):
+        return True
+    return False
+
+
 def _check_git_dirty(workspace: str) -> tuple[bool, list]:
     """
     Run git status --porcelain in the workspace directory.
     Returns (is_dirty, list_of_dirty_files).
+    Runtime lock/stamp files are filtered out so they do not force DEGRADED MODE.
     If git is not available or this is not a git repo, returns (False, [])
     with a warning — we don't want a missing git binary to block startup.
     """
@@ -90,12 +127,19 @@ def _check_git_dirty(workspace: str) -> tuple[bool, list]:
             logger.warning("[startup] git status failed (returncode %d) — skipping dirty check",
                            result.returncode)
             return False, []
-        dirty_lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        dirty_lines = []
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            path = _porcelain_path(line)
+            if _is_runtime_noise(path):
+                logger.info("[startup] Ignoring runtime noise in dirty check: %s", path)
+                continue
+            dirty_lines.append(line.strip())
         return len(dirty_lines) > 0, dirty_lines
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         logger.warning("[startup] git not available or timed out (%s) — skipping dirty check", e)
         return False, []
-
 
 def _probe_audit_rpc() -> tuple[bool, str]:
     """
@@ -199,6 +243,24 @@ def check_startup_preconditions(workspace: str = WORKSPACE_DIR) -> StartupState:
         )
     else:
         logger.info("[startup] ✅ Git clean — working tree matches HEAD")
+
+    # ── 1b. JWT secret required for Telegram identity mint ────────────────────
+    # Without this, listener would announce "online" then drop every message.
+    jwt_secret = os.environ.get("SUPABASE_JWT_SECRET", "").strip()
+    if not jwt_secret:
+        state.degraded = True
+        reason = (
+            "SUPABASE_JWT_SECRET is missing from process environment. "
+            "Telegram identity mint will drop all messages. "
+            "Add it to the secrets file sourced by the wrapper and restart."
+        )
+        state.degraded_reason = (
+            state.degraded_reason + " | " + reason if state.degraded_reason else reason
+        )
+        state.warnings.append("SUPABASE_JWT_SECRET missing")
+        logger.error("[startup] ❌ SUPABASE_JWT_SECRET missing — refuse productive listen")
+    else:
+        logger.info("[startup] ✅ SUPABASE_JWT_SECRET present (value not logged)")
 
     # ── 2. Audit RPC probe (only if audited writes are enabled) ───────────────
     if AUDITED_WRITES_ENABLED:

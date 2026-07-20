@@ -81,40 +81,68 @@ echo "=== Robert deploy verify ==="
 echo "unit=$UNIT workspace=$WORKSPACE phase=$PHASE expected_sha=$EXPECTED_SHA"
 echo
 
-# ── (a) ANTHROPIC_API_KEY in running unit env (masked) ──────────────────────
+# ── (a) Required secrets in running unit env (masked) ───────────────────────
+_read_env_key() {
+  # $1 = environ source (proc file or secrets path), $2 = key name
+  local src="$1" key="$2"
+  if [[ "$src" == /proc/*/environ ]]; then
+    tr '\0' '\n' < "$src" | awk -F= -v k="$key" '$1==k{print substr($0,index($0,"=")+1); exit}'
+  else
+    awk -F= -v k="$key" '$1==k{print substr($0,index($0,"=")+1); exit}' "$src" | tr -d '\r'
+  fi
+}
+
 check_api_key() {
-  local val="" or_val="" environ=""
+  local environ="" envf="${ROBERT_SECRETS_ENV:-/etc/robert/secrets.env}"
+  local anth="" jwt="" sburl="" sbkey=""
+
   if systemctl is-active --quiet "$UNIT" 2>/dev/null; then
     local pid
     pid="$(systemctl show -p MainPID --value "$UNIT" 2>/dev/null || echo 0)"
     if [[ -n "$pid" && "$pid" != "0" && -r "/proc/${pid}/environ" ]]; then
       environ="/proc/${pid}/environ"
-      val="$(tr '\0' '\n' < "$environ" | awk -F= '$1=="ANTHROPIC_API_KEY"{print substr($0,index($0,"=")+1); exit}')"
-      or_val="$(tr '\0' '\n' < "$environ" | awk -F= '$1=="OPENROUTER_API_KEY"{print substr($0,index($0,"=")+1); exit}')"
+      anth="$(_read_env_key "$environ" ANTHROPIC_API_KEY)"
+      jwt="$(_read_env_key "$environ" SUPABASE_JWT_SECRET)"
+      sburl="$(_read_env_key "$environ" SUPABASE_URL)"
+      sbkey="$(_read_env_key "$environ" SUPABASE_SERVICE_KEY)"
     else
-      fail "ANTHROPIC_API_KEY: unit active but MainPID/environ unreadable (need root?)"
+      fail "secrets: unit active but MainPID/environ unreadable (need root?)"
       mask_set "ANTHROPIC_API_KEY" ""
       return
     fi
   else
-    # --phase pre must abort if we cannot prove the key will be loaded
-    local envf="${ROBERT_SECRETS_ENV:-/etc/robert/secrets.env}"
     if [[ -r "$envf" ]]; then
       warn "unit '$UNIT' not active — checking $envf (masked) for pre-flight"
-      val="$(awk -F= '$1=="ANTHROPIC_API_KEY"{print substr($0,index($0,"=")+1); exit}' "$envf" | tr -d '\r')"
-      or_val="$(awk -F= '$1=="OPENROUTER_API_KEY"{print substr($0,index($0,"=")+1); exit}' "$envf" | tr -d '\r')"
+      anth="$(_read_env_key "$envf" ANTHROPIC_API_KEY)"
+      jwt="$(_read_env_key "$envf" SUPABASE_JWT_SECRET)"
+      sburl="$(_read_env_key "$envf" SUPABASE_URL)"
+      sbkey="$(_read_env_key "$envf" SUPABASE_SERVICE_KEY)"
     else
       fail "systemd unit '$UNIT' is not active and $envf unreadable — abort before restart"
       mask_set "ANTHROPIC_API_KEY" ""
       return
     fi
   fi
-  mask_set "ANTHROPIC_API_KEY" "$val"
-  if [[ -n "$val" ]]; then
+
+  mask_set "ANTHROPIC_API_KEY" "$anth"
+  mask_set "SUPABASE_JWT_SECRET" "$jwt"
+  mask_set "SUPABASE_URL" "$sburl"
+  mask_set "SUPABASE_SERVICE_KEY" "$sbkey"
+
+  if [[ -n "$anth" ]]; then
     pass "ANTHROPIC_API_KEY present (masked) — safe to proceed"
   else
-    mask_set "OPENROUTER_API_KEY" "$or_val"
     fail "ANTHROPIC_API_KEY=***MISSING*** — ABORT restart (auth trap)"
+  fi
+  if [[ -n "$jwt" ]]; then
+    pass "SUPABASE_JWT_SECRET present (masked) — identity mint can work"
+  else
+    fail "SUPABASE_JWT_SECRET=***MISSING*** — ABORT (Telegram will drop all messages)"
+  fi
+  if [[ -n "$sburl" && -n "$sbkey" ]]; then
+    pass "SUPABASE_URL + SUPABASE_SERVICE_KEY present (masked)"
+  else
+    fail "SUPABASE_URL or SUPABASE_SERVICE_KEY missing — ABORT"
   fi
 }
 

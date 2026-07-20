@@ -5,7 +5,11 @@
 
 # Runtime state (explicit only — do NOT blanket-ignore *.jsonl)
 robert_memory.json
+robert_memory.json.lock
+robert_listener.lock
+.chat_history_reset_done
 quality_log.jsonl
+*.lock
 
 # Python cache
 __pycache__/
